@@ -21,16 +21,31 @@ class LocalCardRetriever:
 
     def fetch(self, event: IncidentEvent) -> tuple[str, list[str]]:
         card_path = self.cards_dir / f"{event.event_type}.md"
+        query = build_incident_query(event)
         if not card_path.exists():
             self.last_metadata = {
+                "mode": "local",
                 "event_type": event.event_type,
+                "query": query,
+                "query_summary": summarize_query(query),
+                "matched_cards": [],
+                "returned_count": 0,
+                "fallback": False,
+                "fallback_reason": None,
                 "card_found": False,
                 "card_path": str(card_path),
             }
             return "", []
 
         self.last_metadata = {
+            "mode": "local",
             "event_type": event.event_type,
+            "query": query,
+            "query_summary": summarize_query(query),
+            "matched_cards": [f"docs/cards/{event.event_type}.md"],
+            "returned_count": 1,
+            "fallback": False,
+            "fallback_reason": None,
             "card_found": True,
             "card_path": str(card_path),
         }
@@ -48,6 +63,13 @@ def build_incident_query(event: IncidentEvent) -> str:
         " ".join(event.symptoms),
     ]
     return "\n".join(p.strip() for p in parts if p and p.strip())
+
+
+def summarize_query(query: str, max_len: int = 180) -> str:
+    compact = " ".join(query.split())
+    if len(compact) <= max_len:
+        return compact
+    return f"{compact[:max_len].rstrip()}..."
 
 
 class SimpleHashEmbedder:
@@ -169,13 +191,13 @@ class ChromaCardRetriever:
     def __init__(
         self,
         settings: ChromaSettings | None = None,
-        top_k: int = 3,
+        top_k: int | None = None,
         fallback: LocalCardRetriever | None = None,
         api: ChromaHttpAPI | None = None,
         embedder: SimpleHashEmbedder | None = None,
     ) -> None:
         self.settings = settings or ChromaSettings.from_env()
-        self.top_k = top_k
+        self.top_k = top_k if top_k is not None else _read_top_k_from_env()
         self.fallback = fallback
         self.api = api or ChromaHttpAPI(self.settings)
         self.embedder = embedder or SimpleHashEmbedder()
@@ -183,6 +205,7 @@ class ChromaCardRetriever:
 
     def fetch(self, event: IncidentEvent) -> tuple[str, list[str]]:
         query = build_incident_query(event)
+        query_summary = summarize_query(query)
         try:
             emb = self.embedder.embed(query)
             raw = self.api.query(emb, self.top_k)
@@ -191,6 +214,7 @@ class ChromaCardRetriever:
             ids = (raw.get("ids") or [[]])[0] or []
 
             refs: list[str] = []
+            hits: list[dict[str, Any]] = []
             for idx, doc in enumerate(documents):
                 if not str(doc).strip():
                     continue
@@ -198,14 +222,25 @@ class ChromaCardRetriever:
                 ref = str(meta.get("path") or ids[idx] if idx < len(ids) else "")
                 if ref:
                     refs.append(ref)
+                hits.append(
+                    {
+                        "id": str(ids[idx]) if idx < len(ids) else "",
+                        "path": ref,
+                        "event_type": str(meta.get("event_type") or ""),
+                    }
+                )
 
             context = "\n\n---\n\n".join(str(x) for x in documents if str(x).strip())
             self.last_metadata = {
                 "mode": "chroma",
                 "query": query,
+                "query_summary": query_summary,
                 "query_len": len(query),
-                "results": len(refs),
+                "top_k": self.top_k,
+                "matched_cards": hits,
+                "returned_count": len(refs),
                 "fallback": False,
+                "fallback_reason": None,
                 "collection": self.settings.collection,
                 "endpoint": f"{self.settings.host}:{self.settings.port}",
             }
@@ -214,6 +249,10 @@ class ChromaCardRetriever:
             self.last_metadata = {
                 "mode": "chroma",
                 "query": query,
+                "query_summary": query_summary,
+                "top_k": self.top_k,
+                "matched_cards": [],
+                "returned_count": 0,
                 "fallback": True,
                 "fallback_reason": f"chroma_error:{exc.__class__.__name__}",
                 "collection": self.settings.collection,
@@ -225,6 +264,15 @@ class ChromaCardRetriever:
                 self.last_metadata["local"] = getattr(self.fallback, "last_metadata", {})
                 return context, refs
             return "", []
+
+
+def _read_top_k_from_env(default: int = 3) -> int:
+    raw = (os.getenv("CHROMA_TOP_K", str(default)) or str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def build_cards_index(cards_dir: Path, api: ChromaHttpAPI, embedder: SimpleHashEmbedder) -> int:

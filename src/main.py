@@ -22,6 +22,15 @@ CARDS_DIR = BASE_DIR / "docs" / "cards"
 SAMPLES_DIR = BASE_DIR / "samples" / "incidents"
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name, str(default)) or str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OpsCopilot MVP incident analyzer")
     parser.add_argument(
@@ -42,6 +51,12 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("RETRIEVER_MODE", "local"),
         help="Retriever mode: local (default) or chroma",
     )
+    parser.add_argument(
+        "--chroma-top-k",
+        type=int,
+        default=_env_int("CHROMA_TOP_K", 3),
+        help="Top K docs for Chroma retrieval (default from CHROMA_TOP_K or 3)",
+    )
     return parser.parse_args()
 
 
@@ -51,10 +66,14 @@ def build_generator(mode: str):
     return RuleBasedAnalyzer()
 
 
-def build_retriever(mode: str):
+def build_retriever(mode: str, chroma_top_k: int):
     local = LocalCardRetriever(CARDS_DIR)
     if mode == "chroma":
-        return ChromaCardRetriever(settings=ChromaSettings.from_env(), fallback=local)
+        return ChromaCardRetriever(
+            settings=ChromaSettings.from_env(),
+            top_k=chroma_top_k,
+            fallback=local,
+        )
     return local
 
 
@@ -70,7 +89,7 @@ def main() -> int:
     event = load_event(args.event)
 
     pipeline = IncidentAnalysisPipeline(
-        retriever=build_retriever(args.retriever),
+        retriever=build_retriever(args.retriever, args.chroma_top_k),
         generator=build_generator(args.mode),
     )
     result = pipeline.run(event)
@@ -81,6 +100,7 @@ def main() -> int:
         debug_meta = {
             "mode": args.mode,
             "retriever": args.retriever,
+            "chroma_top_k": args.chroma_top_k,
             "llm_requested": args.mode == "llm",
             "pipeline": pipeline.last_run_metadata,
         }

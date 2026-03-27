@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import os
 import unittest
 
 from opscopilot.io import load_event
@@ -14,7 +16,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 class FakeClient:
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
-        _ = (system_prompt, user_prompt)
+        _ = system_prompt
+        parsed = json.loads(user_prompt)
+        assert "incident" in parsed["input_layers"]
+        assert "retrieved_context" in parsed["input_layers"]
+        assert "rule_result" in parsed["input_layers"]
         return {
             "summary": "LLM summary",
             "possible_causes": ["A", "B"],
@@ -32,12 +38,21 @@ class FailingClient:
 
 class FakeChromaAPI:
     def query(self, query_embedding: list[float], n_results: int) -> dict:
-        _ = (query_embedding, n_results)
+        _ = query_embedding
+        docs = [
+            "# high_cpu\n\nmock chroma card",
+            "# high_memory\n\nmock chroma memory card",
+        ]
+        meta = [
+            {"path": "docs/cards/high_cpu.md", "event_type": "high_cpu"},
+            {"path": "docs/cards/high_memory.md", "event_type": "high_memory"},
+        ]
+        ids = ["high_cpu", "high_memory"]
         return {
-            "ids": [["high_cpu"]],
-            "documents": [["# high_cpu\n\nmock chroma card"]],
-            "metadatas": [[{"path": "docs/cards/high_cpu.md"}]],
-            "distances": [[0.1]],
+            "ids": [ids[:n_results]],
+            "documents": [docs[:n_results]],
+            "metadatas": [meta[:n_results]],
+            "distances": [[0.1, 0.2][:n_results]],
         }
 
 
@@ -76,6 +91,10 @@ class PipelineTest(unittest.TestCase):
         # pipeline retriever refs should take priority
         self.assertIn("docs/cards/high_cpu.md", result.recommended_refs)
         self.assertTrue(pipeline.last_run_metadata["generator"].get("llm_used"))
+        self.assertEqual(
+            ["incident", "retrieved_context", "rule_result"],
+            pipeline.last_run_metadata["generator"].get("input_layers"),
+        )
 
     def test_unknown_event_type_and_missing_card(self) -> None:
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
@@ -113,13 +132,16 @@ class PipelineTest(unittest.TestCase):
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
         event = load_event(event_path)
 
-        retriever = ChromaCardRetriever(api=FakeChromaAPI())
+        retriever = ChromaCardRetriever(api=FakeChromaAPI(), top_k=2)
         context, refs = retriever.fetch(event)
 
         self.assertIn("mock chroma card", context)
-        self.assertEqual(["docs/cards/high_cpu.md"], refs)
+        self.assertEqual(["docs/cards/high_cpu.md", "docs/cards/high_memory.md"], refs)
         self.assertEqual("chroma", retriever.last_metadata.get("mode"))
+        self.assertEqual(2, retriever.last_metadata.get("top_k"))
         self.assertFalse(retriever.last_metadata.get("fallback"))
+        self.assertEqual(2, retriever.last_metadata.get("returned_count"))
+        self.assertEqual(2, len(retriever.last_metadata.get("matched_cards", [])))
 
     def test_chroma_fallback_to_local_when_error(self) -> None:
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
@@ -136,6 +158,46 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("docs/cards/high_cpu.md", refs)
         self.assertTrue(retriever.last_metadata.get("fallback"))
         self.assertEqual("local", retriever.last_metadata.get("fallback_target"))
+        self.assertTrue(retriever.last_metadata.get("local", {}).get("mode") == "local")
+
+    def test_local_retriever_metadata_contains_required_fields(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_memory.json")
+        retriever = LocalCardRetriever(BASE_DIR / "docs" / "cards")
+        _, _ = retriever.fetch(event)
+
+        metadata = retriever.last_metadata
+        self.assertEqual("local", metadata.get("mode"))
+        self.assertTrue(metadata.get("query"))
+        self.assertTrue(metadata.get("query_summary"))
+        self.assertEqual(1, metadata.get("returned_count"))
+        self.assertFalse(metadata.get("fallback"))
+        self.assertIsNone(metadata.get("fallback_reason"))
+
+    def test_chroma_top_k_from_env(self) -> None:
+        os.environ["CHROMA_TOP_K"] = "5"
+        try:
+            retriever = ChromaCardRetriever(api=FakeChromaAPI())
+            self.assertEqual(5, retriever.top_k)
+        finally:
+            os.environ.pop("CHROMA_TOP_K", None)
+
+
+class RetrieverComparisonTest(unittest.TestCase):
+    def test_local_vs_chroma_minimal_coverage(self) -> None:
+        cards_dir = BASE_DIR / "docs" / "cards"
+        local = LocalCardRetriever(cards_dir)
+        chroma = ChromaCardRetriever(api=FakeChromaAPI(), top_k=1, fallback=local)
+
+        for sample in ["high_cpu", "high_memory", "mysql_too_many_connections"]:
+            event = load_event(BASE_DIR / "samples" / "incidents" / f"{sample}.json")
+
+            local_context, local_refs = local.fetch(event)
+            chroma_context, chroma_refs = chroma.fetch(event)
+
+            self.assertTrue(local_context.strip())
+            self.assertTrue(local_refs)
+            self.assertTrue(chroma_context.strip())
+            self.assertTrue(chroma_refs)
 
 
 if __name__ == "__main__":

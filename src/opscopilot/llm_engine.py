@@ -137,6 +137,7 @@ class LLMAnalyzer:
             "在不改变输出字段的前提下，补充更贴近当前事件的排查建议",
         )
         user_prompt = self._build_user_prompt(event, context, rule_result, task)
+        metadata["input_layers"] = ["incident", "retrieved_context", "rule_result"]
 
         try:
             metadata["llm_called"] = True
@@ -163,9 +164,12 @@ class LLMAnalyzer:
         return json.dumps(
             {
                 "task": task,
-                "input": {
+                "input_layers": {
                     "incident": event.raw,
-                    "knowledge_card": context,
+                    "retrieved_context": {
+                        "raw_text": context,
+                        "present": bool(context.strip()),
+                    },
                     "rule_result": {
                         "summary": rule_result.summary,
                         "possible_causes": rule_result.possible_causes,
@@ -174,6 +178,11 @@ class LLMAnalyzer:
                         "confidence": rule_result.confidence,
                     },
                 },
+                "instructions": [
+                    "必须区分 incident、retrieved_context、rule_result 三层信息。",
+                    "若 retrieved_context 为空，不要编造资料来源。",
+                    "输出必须严格遵守 output_schema。",
+                ],
                 "output_schema": {
                     "summary": "string",
                     "possible_causes": ["string"],
