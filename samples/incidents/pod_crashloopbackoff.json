@@ -1,0 +1,15 @@
+{
+  "id": "evt-003",
+  "source": "manual",
+  "service": "payment-worker",
+  "environment": "prod",
+  "event_type": "pod_crashloopbackoff",
+  "severity": "critical",
+  "title": "Pod entered CrashLoopBackOff",
+  "description": "payment-worker pod repeatedly restarts and enters CrashLoopBackOff.",
+  "symptoms": [
+    "restarts increased rapidly",
+    "service tasks delayed"
+  ],
+  "timestamp": "2026-03-26T15:10:00+08:00"
+}

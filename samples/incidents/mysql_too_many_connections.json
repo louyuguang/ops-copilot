@@ -1,0 +1,15 @@
+{
+  "id": "evt-004",
+  "source": "manual",
+  "service": "mysql-primary",
+  "environment": "prod",
+  "event_type": "mysql_too_many_connections",
+  "severity": "critical",
+  "title": "MySQL too many connections",
+  "description": "MySQL primary reports too many connections and some application requests fail.",
+  "symptoms": [
+    "database connection errors increased",
+    "application requests returned 500"
+  ],
+  "timestamp": "2026-03-26T15:15:00+08:00"
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opscopilot.local/schemas/analysis-output.schema.json",
+  "title": "AnalysisOutput",
+  "type": "object",
+  "required": [
+    "summary",
+    "possible_causes",
+    "suggested_checks",
+    "recommended_refs",
+    "confidence"
+  ],
+  "properties": {
+    "summary": { "type": "string" },
+    "possible_causes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "suggested_checks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "recommended_refs": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,15 @@
+{
+  "id": "evt-005",
+  "source": "manual",
+  "service": "edge-nginx",
+  "environment": "prod",
+  "event_type": "nginx_5xx_spike",
+  "severity": "critical",
+  "title": "Nginx 5xx responses spiked",
+  "description": "Nginx 5xx responses increased significantly within the last 5 minutes.",
+  "symptoms": [
+    "error rate increased",
+    "user requests failed intermittently"
+  ],
+  "timestamp": "2026-03-26T15:20:00+08:00"
+}

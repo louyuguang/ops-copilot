@@ -1,0 +1,20 @@
+services:
+  opscopilot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      ANALYSIS_MODE: ${ANALYSIS_MODE:-rule}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-sub2api/gpt-5.4}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      RETRIEVER_MODE: ${RETRIEVER_MODE:-local}
+      CHROMA_HOST: ${CHROMA_HOST:-localhost}
+      CHROMA_PORT: ${CHROMA_PORT:-18000}
+      CHROMA_COLLECTION: ${CHROMA_COLLECTION:-opscopilot_cards_v1}
+      CHROMA_TENANT: ${CHROMA_TENANT:-default_tenant}
+      CHROMA_DATABASE: ${CHROMA_DATABASE:-default_database}
+      OPSCOPILOT_DEBUG: ${OPSCOPILOT_DEBUG:-0}
+    command: ["python", "src/main.py"]

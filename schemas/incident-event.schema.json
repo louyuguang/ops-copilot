@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opscopilot.local/schemas/incident-event.schema.json",
+  "title": "IncidentEvent",
+  "type": "object",
+  "required": [
+    "id",
+    "source",
+    "service",
+    "environment",
+    "event_type",
+    "severity",
+    "title",
+    "description",
+    "timestamp"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "source": { "type": "string" },
+    "service": { "type": "string" },
+    "environment": { "type": "string" },
+    "event_type": { "type": "string" },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "warning", "critical"]
+    },
+    "title": { "type": "string" },
+    "description": { "type": "string" },
+    "symptoms": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "timestamp": { "type": "string" }
+  },
+  "additionalProperties": true
+}

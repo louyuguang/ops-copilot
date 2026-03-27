@@ -1,0 +1,15 @@
+{
+  "id": "evt-002",
+  "source": "manual",
+  "service": "user-profile-api",
+  "environment": "prod",
+  "event_type": "high_memory",
+  "severity": "warning",
+  "title": "Memory usage > 85% for 15m",
+  "description": "Memory usage of user-profile-api remains above 85% for 15 minutes.",
+  "symptoms": [
+    "gc frequency increased",
+    "latency became unstable"
+  ],
+  "timestamp": "2026-03-26T15:05:00+08:00"
+}

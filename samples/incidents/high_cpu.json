@@ -1,0 +1,15 @@
+{
+  "id": "evt-001",
+  "source": "manual",
+  "service": "checkout-api",
+  "environment": "prod",
+  "event_type": "high_cpu",
+  "severity": "warning",
+  "title": "CPU usage > 90% for 10m",
+  "description": "CPU usage of checkout-api remains above 90% for 10 minutes.",
+  "symptoms": [
+    "response time increased",
+    "some requests timed out"
+  ],
+  "timestamp": "2026-03-26T15:00:00+08:00"
+}

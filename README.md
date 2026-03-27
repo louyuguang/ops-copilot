@@ -1,0 +1,200 @@
+# OpsCopilot
+
+一个面向运维 / SRE 场景的事件分析与排查建议助手。
+
+## 当前阶段
+
+MVP（最小可行版本）
+
+当前目标：
+- 使用公开样本或自造样本构建最小事件分析链路
+- 输入一条结构化事件
+- 输出结构化的初步分析建议
+- 为后续接入 RAG、Tool Calling、评测、可观测性做准备
+
+## MVP 定义
+
+OpsCopilot 第一版不是自动修复系统，也不是复杂多 Agent 平台。
+
+第一版只做一件事：
+
+> 输入一条结构化事件，输出结构化分析建议。
+
+### 输入
+- 一条结构化事件（incident event）
+
+### 输出
+- 事件摘要
+- 可能原因
+- 建议检查项
+- 推荐参考资料
+- 置信度
+
+## 当前能力（Week4 Day1）
+
+- `RuleBasedAnalyzer`：稳定基线分析器（默认）
+- `LLMAnalyzer`：可控的 LLM 分析器（与 rule 并存，不替换 baseline）
+  - 输入基础：incident + knowledge card + rule result
+  - 输出仍为同一结构化 schema
+  - 当未配置 `OPENAI_API_KEY` 或 LLM 调用异常时，自动回退到 rule 结果
+- Prompt 模板从代码抽离到文件：
+  - `src/opscopilot/prompts/llm_system.txt`
+  - `src/opscopilot/prompts/llm_task.txt`
+- 最小可观测信息（不影响主输出 schema）：
+  - pipeline 保存 `last_run_metadata`
+  - `OPSCOPILOT_DEBUG=1` 时将 metadata 输出到 `stderr`
+- 支持分析模式切换：`rule | llm`
+- 新增最小检索模式切换：`local | chroma`
+  - `local`：按 `event_type -> docs/cards/<event_type>.md` 读取（原逻辑保留）
+  - `chroma`：从 Chroma 检索 `docs/cards/*.md`（每张 card = 一个 document）
+  - 检索 query 组合字段：`event_type + title + description + service + environment + symptoms`
+  - Chroma 不可用/异常时自动回退到 local retriever
+
+## 本地运行
+
+```bash
+cd /Users/louyuguang/.openclaw/workspace/projects/OpsCopilot
+export PYTHONPATH=src
+python src/main.py --event samples/incidents/high_cpu.json --mode rule
+```
+
+LLM 模式（先准备环境变量）：
+
+```bash
+cp .env.example .env
+# 编辑 .env 注入真实 OPENAI_API_KEY（不要提交）
+export $(grep -v '^#' .env | xargs)
+python src/main.py --event samples/incidents/high_cpu.json --mode llm
+```
+
+也可用环境变量控制默认模式：
+
+```bash
+export ANALYSIS_MODE=llm
+python src/main.py --event samples/incidents/high_cpu.json
+```
+
+检索模式切换（默认 local）：
+
+```bash
+# local（不依赖 Chroma）
+python src/main.py --event samples/incidents/high_cpu.json --retriever local
+
+# chroma（失败会自动 fallback 到 local）
+python src/main.py --event samples/incidents/high_cpu.json --retriever chroma
+
+# 或环境变量
+export RETRIEVER_MODE=chroma
+python src/main.py --event samples/incidents/high_cpu.json
+```
+
+可观测调试（stderr）：
+
+```bash
+export OPSCOPILOT_DEBUG=1
+python src/main.py --event samples/incidents/high_cpu.json --mode llm
+```
+
+## 构建 Chroma cards 索引（最小版）
+
+> 当前最小实现：`docs/cards/*.md` 每个文件作为一个 document 写入 Chroma。
+
+```bash
+export PYTHONPATH=src
+export CHROMA_HOST=localhost
+export CHROMA_PORT=18000
+export CHROMA_COLLECTION=opscopilot_cards_v1
+python src/build_chroma_index.py
+```
+
+预期输出类似：
+
+```json
+{"indexed_cards": 5, "collection": "opscopilot_cards_v1", "chroma": "localhost:18000"}
+```
+
+## 测试
+
+```bash
+export PYTHONPATH=src
+python -m unittest discover -s tests
+```
+
+最小验证建议：
+
+```bash
+# 1) baseline local 不变
+python src/main.py --event samples/incidents/high_cpu.json --mode rule --retriever local
+
+# 2) 先建索引，再走 chroma
+python src/build_chroma_index.py
+python src/main.py --event samples/incidents/high_cpu.json --mode rule --retriever chroma
+
+# 3) 人为把 CHROMA_PORT 改错，验证 fallback
+CHROMA_PORT=1 python src/main.py --event samples/incidents/high_cpu.json --retriever chroma
+```
+
+## Docker
+
+构建镜像：
+
+```bash
+docker build -t opscopilot:day6 .
+```
+
+rule 模式运行：
+
+```bash
+docker run --rm opscopilot:day6
+```
+
+llm 模式运行：
+
+```bash
+docker run --rm \
+  -e ANALYSIS_MODE=llm \
+  -e OPENAI_API_KEY=your_key \
+  -e OPENAI_MODEL=sub2api/gpt-5.4 \
+  -e OPENAI_BASE_URL=https://api.openai.com/v1 \
+  opscopilot:day6
+```
+
+## Docker Compose
+
+```bash
+cp .env.example .env
+# 编辑 .env 填入 API key / base URL / model
+
+docker compose up --build
+```
+
+覆盖一次性模式（例如切到 llm）：
+
+```bash
+ANALYSIS_MODE=llm docker compose up --build
+```
+
+## Target Architecture
+
+> 下面这张图是 OpsCopilot 的**目标态架构图**（planned / target architecture），不是当前所有能力都已完成的现状图。
+>
+> 当前 MVP 已经实现的部分主要包括：本地 incident 输入、LocalCardRetriever、RuleBasedAnalyzer、LLMAnalyzer、结构化 JSON 输出、Docker / docker-compose 运行、最小测试与 debug metadata。检索索引、embedding、向量存储、reranker、更多工具系统等属于后续演进方向。
+
+![OpsCopilot Target Architecture](docs/assets/opscopilot-target-architecture.jpg)
+
+## 当前目录
+
+```text
+OpsCopilot/
+  README.md
+  docker-compose.yml
+  docs/
+    cards/
+  samples/
+    incidents/
+  schemas/
+  src/
+    opscopilot/
+      prompts/
+  tests/
+```
