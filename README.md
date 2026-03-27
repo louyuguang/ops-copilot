@@ -166,6 +166,15 @@ python scripts/compare_retrievers.py --top-k-values 1,3,5
 
 # 6) compare 流程中显式展示 chroma 不可用回退场景
 python scripts/compare_retrievers.py --simulate-chroma-down
+
+# 7) 产出可落盘评测工件（建议放 reports/）
+python scripts/compare_retrievers.py --output-json reports/compare/latest.json
+
+# 8) 本次 vs 上次趋势比较 + 阈值提醒
+python scripts/compare_retrievers.py \
+  --baseline-json reports/compare/prev.json \
+  --output-json reports/compare/latest.json \
+  --warn-threshold 2
 ```
 
 `compare_retrievers.py` 现在支持三层输出：
@@ -185,10 +194,13 @@ python scripts/compare_retrievers.py --simulate-chroma-down
 3) 机器可读 JSON（`JSON_REPORT`）
 - 保留每个样本/每个对比对的明细
 - 追加 `comparisons[].summary` 聚合统计，便于后续自动化处理
+- 可通过 `--output-json reports/compare/latest.json` 落盘（自动创建父目录）
 
-额外能力（Day4）：
+额外能力（Day4+Day5）：
 - 轻量参数矩阵：`--top-k-values 1,3,5`（按 `local vs chroma_top_k_*` 逐组对比）
 - fallback compare 可见性：`--simulate-chroma-down`（在报告中单独加入 `local_vs_chroma_fallback`）
+- baseline 趋势对比：`--baseline-json <prev_report>`，输出 `trend_vs_baseline`（含关键聚合指标 delta）
+- 阈值提醒：`--warn-threshold <n>`，当 diff count 超阈值时在人类可读输出中给出 WARNING，JSON 同步写入 `warnings`
 
 ## Docker
 

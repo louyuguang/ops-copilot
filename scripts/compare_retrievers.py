@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SRC_MAIN = BASE_DIR / "src" / "main.py"
@@ -13,6 +14,13 @@ DEFAULT_SAMPLES = [
     "high_cpu",
     "high_memory",
     "mysql_too_many_connections",
+]
+TREND_KEYS = [
+    "recommended_refs_diff_count",
+    "possible_causes_diff_count",
+    "suggested_checks_diff_count",
+    "summary_equal_true_count",
+    "summary_equal_false_count",
 ]
 
 
@@ -210,6 +218,115 @@ def build_variants(args: argparse.Namespace) -> list[dict]:
     return variants
 
 
+def load_json_file(path: str | None) -> dict[str, Any] | None:
+    if not path:
+        return None
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def build_trend_vs_baseline(report: dict[str, Any], baseline_report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not baseline_report:
+        return []
+
+    baseline_map = {
+        item.get("name"): item.get("summary", {})
+        for item in baseline_report.get("comparisons", [])
+        if isinstance(item, dict)
+    }
+    trend_rows: list[dict[str, Any]] = []
+
+    for comparison in report.get("comparisons", []):
+        name = comparison.get("name")
+        current_summary = comparison.get("summary", {})
+        baseline_summary = baseline_map.get(name)
+        if baseline_summary is None:
+            trend_rows.append({"name": name, "status": "baseline_missing"})
+            continue
+
+        deltas = {
+            key: int(current_summary.get(key, 0)) - int(baseline_summary.get(key, 0))
+            for key in TREND_KEYS
+        }
+        trend_rows.append(
+            {
+                "name": name,
+                "status": "ok",
+                "current": {key: int(current_summary.get(key, 0)) for key in TREND_KEYS},
+                "baseline": {key: int(baseline_summary.get(key, 0)) for key in TREND_KEYS},
+                "delta": deltas,
+            }
+        )
+
+    return trend_rows
+
+
+def render_trend_summary(trend_rows: list[dict[str, Any]]) -> str:
+    if not trend_rows:
+        return ""
+
+    lines = ["--- BASELINE_TREND ---"]
+    for row in trend_rows:
+        lines.append(f"comparison: {row['name']}")
+        if row.get("status") != "ok":
+            lines.append("  baseline: missing")
+            continue
+        for key in TREND_KEYS:
+            delta = row["delta"][key]
+            sign = "+" if delta >= 0 else ""
+            lines.append(
+                f"  {key}: current={row['current'][key]}, baseline={row['baseline'][key]}, delta={sign}{delta}"
+            )
+    return "\n".join(lines)
+
+
+def build_warnings(comparisons: list[dict[str, Any]], warn_threshold: int | None) -> list[dict[str, Any]]:
+    if warn_threshold is None:
+        return []
+
+    warning_keys = [
+        "recommended_refs_diff_count",
+        "possible_causes_diff_count",
+        "suggested_checks_diff_count",
+    ]
+    warnings: list[dict[str, Any]] = []
+    for comp in comparisons:
+        summary = comp.get("summary", {})
+        exceeded = {
+            key: int(summary.get(key, 0))
+            for key in warning_keys
+            if int(summary.get(key, 0)) > warn_threshold
+        }
+        if exceeded:
+            warnings.append(
+                {
+                    "comparison": comp.get("name"),
+                    "threshold": warn_threshold,
+                    "exceeded": exceeded,
+                }
+            )
+    return warnings
+
+
+def render_warnings(warnings: list[dict[str, Any]]) -> str:
+    if not warnings:
+        return ""
+
+    lines = ["--- WARNINGS ---"]
+    for warning in warnings:
+        lines.append(
+            f"WARNING comparison={warning['comparison']} threshold={warning['threshold']} exceeded={warning['exceeded']}"
+        )
+    return "\n".join(lines)
+
+
+def write_json_report(report: dict[str, Any], output_json: str | None) -> None:
+    if not output_json:
+        return
+    output_path = Path(output_json)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare local/chroma retrievers")
     parser.add_argument(
@@ -227,18 +344,42 @@ def main() -> int:
         action="store_true",
         help="Add an explicit chroma unavailable scenario to show fallback visibility",
     )
+    parser.add_argument(
+        "--output-json",
+        default=None,
+        help="Write JSON report artifact to file path",
+    )
+    parser.add_argument(
+        "--baseline-json",
+        default=None,
+        help="Previous JSON report path used for trend comparison",
+    )
+    parser.add_argument(
+        "--warn-threshold",
+        type=int,
+        default=None,
+        help="Warn when diff counts are greater than this threshold",
+    )
     args = parser.parse_args()
+
+    if args.warn_threshold is not None and args.warn_threshold < 0:
+        raise ValueError("warn threshold must be >= 0")
 
     samples = parse_csv_values(args.samples)
     variants = build_variants(args)
-    report: dict[str, object] = {
+    report: dict[str, Any] = {
         "config": {
             "samples": samples,
             "top_k_values": parse_top_k_values(args.top_k_values),
             "simulate_chroma_down": args.simulate_chroma_down,
+            "output_json": args.output_json,
+            "baseline_json": args.baseline_json,
+            "warn_threshold": args.warn_threshold,
         },
         "runs": {},
         "comparisons": [],
+        "trend_vs_baseline": [],
+        "warnings": [],
     }
     lines: list[str] = []
 
@@ -280,9 +421,26 @@ def main() -> int:
             }
         )
 
+    baseline_report = load_json_file(args.baseline_json)
+    trend_rows = build_trend_vs_baseline(report, baseline_report)
+    report["trend_vs_baseline"] = trend_rows
+
+    warnings = build_warnings(report["comparisons"], args.warn_threshold)
+    report["warnings"] = warnings
+
+    trend_text = render_trend_summary(trend_rows)
+    if trend_text:
+        lines.append(trend_text)
+
+    warning_text = render_warnings(warnings)
+    if warning_text:
+        lines.append(warning_text)
+
     print("\n\n".join(lines))
     print("\n--- JSON_REPORT ---")
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+    write_json_report(report, args.output_json)
     return 0
 
 
