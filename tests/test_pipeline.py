@@ -142,6 +142,8 @@ class PipelineTest(unittest.TestCase):
         self.assertFalse(retriever.last_metadata.get("fallback"))
         self.assertEqual(2, retriever.last_metadata.get("returned_count"))
         self.assertEqual(2, len(retriever.last_metadata.get("matched_cards", [])))
+        self.assertGreater(retriever.last_metadata.get("retrieved_context_len", 0), 0)
+        self.assertGreater(retriever.last_metadata.get("query_len", 0), 0)
 
     def test_chroma_fallback_to_local_when_error(self) -> None:
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
@@ -159,6 +161,8 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(retriever.last_metadata.get("fallback"))
         self.assertEqual("local", retriever.last_metadata.get("fallback_target"))
         self.assertTrue(retriever.last_metadata.get("local", {}).get("mode") == "local")
+        self.assertGreater(retriever.last_metadata.get("retrieved_context_len", 0), 0)
+        self.assertGreater(retriever.last_metadata.get("query_len", 0), 0)
 
     def test_local_retriever_metadata_contains_required_fields(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_memory.json")
@@ -169,6 +173,9 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual("local", metadata.get("mode"))
         self.assertTrue(metadata.get("query"))
         self.assertTrue(metadata.get("query_summary"))
+        self.assertGreater(metadata.get("query_len", 0), 0)
+        self.assertEqual(1, metadata.get("top_k"))
+        self.assertGreater(metadata.get("retrieved_context_len", 0), 0)
         self.assertEqual(1, metadata.get("returned_count"))
         self.assertFalse(metadata.get("fallback"))
         self.assertIsNone(metadata.get("fallback_reason"))
@@ -198,6 +205,32 @@ class RetrieverComparisonTest(unittest.TestCase):
             self.assertTrue(local_refs)
             self.assertTrue(chroma_context.strip())
             self.assertTrue(chroma_refs)
+
+
+class CompareScriptTest(unittest.TestCase):
+    def test_compare_script_prints_diff_sections(self) -> None:
+        import subprocess
+        import sys
+
+        script = BASE_DIR / "scripts" / "compare_retrievers.py"
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "src"
+
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=BASE_DIR,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        stdout = proc.stdout
+        self.assertIn("=== high_cpu ===", stdout)
+        self.assertIn("recommended_refs", stdout)
+        self.assertIn("possible_causes", stdout)
+        self.assertIn("suggested_checks", stdout)
+        self.assertIn("--- JSON_REPORT ---", stdout)
 
 
 if __name__ == "__main__":

@@ -22,12 +22,16 @@ class LocalCardRetriever:
     def fetch(self, event: IncidentEvent) -> tuple[str, list[str]]:
         card_path = self.cards_dir / f"{event.event_type}.md"
         query = build_incident_query(event)
+        query_summary = summarize_query(query)
         if not card_path.exists():
             self.last_metadata = {
                 "mode": "local",
                 "event_type": event.event_type,
                 "query": query,
-                "query_summary": summarize_query(query),
+                "query_summary": query_summary,
+                "query_len": len(query),
+                "top_k": 1,
+                "retrieved_context_len": 0,
                 "matched_cards": [],
                 "returned_count": 0,
                 "fallback": False,
@@ -37,11 +41,15 @@ class LocalCardRetriever:
             }
             return "", []
 
+        context = card_path.read_text(encoding="utf-8")
         self.last_metadata = {
             "mode": "local",
             "event_type": event.event_type,
             "query": query,
-            "query_summary": summarize_query(query),
+            "query_summary": query_summary,
+            "query_len": len(query),
+            "top_k": 1,
+            "retrieved_context_len": len(context),
             "matched_cards": [f"docs/cards/{event.event_type}.md"],
             "returned_count": 1,
             "fallback": False,
@@ -49,7 +57,7 @@ class LocalCardRetriever:
             "card_found": True,
             "card_path": str(card_path),
         }
-        return card_path.read_text(encoding="utf-8"), [f"docs/cards/{event.event_type}.md"]
+        return context, [f"docs/cards/{event.event_type}.md"]
 
 
 def build_incident_query(event: IncidentEvent) -> str:
@@ -237,6 +245,7 @@ class ChromaCardRetriever:
                 "query_summary": query_summary,
                 "query_len": len(query),
                 "top_k": self.top_k,
+                "retrieved_context_len": len(context),
                 "matched_cards": hits,
                 "returned_count": len(refs),
                 "fallback": False,
@@ -250,7 +259,9 @@ class ChromaCardRetriever:
                 "mode": "chroma",
                 "query": query,
                 "query_summary": query_summary,
+                "query_len": len(query),
                 "top_k": self.top_k,
+                "retrieved_context_len": 0,
                 "matched_cards": [],
                 "returned_count": 0,
                 "fallback": True,
@@ -261,6 +272,7 @@ class ChromaCardRetriever:
             if self.fallback is not None:
                 context, refs = self.fallback.fetch(event)
                 self.last_metadata["fallback_target"] = "local"
+                self.last_metadata["retrieved_context_len"] = len(context)
                 self.last_metadata["local"] = getattr(self.fallback, "last_metadata", {})
                 return context, refs
             return "", []
