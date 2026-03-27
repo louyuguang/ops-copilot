@@ -97,7 +97,31 @@ class CompareRetrieverScriptUnitTest(unittest.TestCase):
         self.assertEqual(2, trend[0]["delta"]["suggested_checks_diff_count"])
         self.assertEqual(-1, trend[0]["delta"]["summary_equal_true_count"])
 
-    def test_main_output_json_and_warnings(self) -> None:
+    def test_baseline_coverage_stats(self) -> None:
+        report = {
+            "comparisons": [
+                {"name": "local_vs_chroma"},
+                {"name": "local_vs_chroma_top_k_1"},
+            ]
+        }
+        baseline = {
+            "comparisons": [
+                {"name": "local_vs_chroma"},
+                {"name": "local_vs_chroma_top_k_3"},
+            ]
+        }
+        trend_rows = [
+            {"name": "local_vs_chroma", "status": "ok"},
+            {"name": "local_vs_chroma_top_k_1", "status": "baseline_missing"},
+        ]
+
+        stats = compare_retrievers.build_baseline_coverage_stats(report, baseline, trend_rows)
+        self.assertEqual(1, stats["baseline_missing_count"])
+        self.assertEqual(["local_vs_chroma_top_k_1"], stats["baseline_missing_names"])
+        self.assertEqual(1, stats["comparison_missing_in_baseline_count"])
+        self.assertEqual(["local_vs_chroma_top_k_3"], stats["comparison_missing_in_baseline_names"])
+
+    def test_main_output_json_warnings_and_meta(self) -> None:
         def fake_run_case(sample: str, retriever: str, chroma_top_k=None, extra_env=None):
             base = {
                 "summary": f"summary-{sample}",
@@ -128,7 +152,11 @@ class CompareRetrieverScriptUnitTest(unittest.TestCase):
                                     "summary_equal_true_count": 1,
                                     "summary_equal_false_count": 0,
                                 },
-                            }
+                            },
+                            {
+                                "name": "local_vs_chroma_top_k_9",
+                                "summary": {},
+                            },
                         ]
                     }
                 ),
@@ -153,10 +181,42 @@ class CompareRetrieverScriptUnitTest(unittest.TestCase):
             self.assertEqual(0, rc)
             self.assertTrue(output_json.exists())
             written = json.loads(output_json.read_text(encoding="utf-8"))
+            self.assertIn("meta", written)
+            self.assertIn("run_timestamp", written["meta"])
+            self.assertIn("git_commit", written["meta"])
+            self.assertIn("args", written["meta"])
+            self.assertIn("samples", written["meta"]["args"])
             self.assertIn("trend_vs_baseline", written)
+            self.assertIn("baseline_coverage", written)
+            self.assertEqual(1, written["baseline_coverage"]["comparison_missing_in_baseline_count"])
             self.assertTrue(written["warnings"])
             self.assertEqual("local_vs_chroma", written["trend_vs_baseline"][0]["name"])
             self.assertIn("--- WARNINGS ---", buf.getvalue())
+
+    def test_main_fail_on_warn_exit_code(self) -> None:
+        def fake_run_case(sample: str, retriever: str, chroma_top_k=None, extra_env=None):
+            base = {
+                "summary": f"summary-{sample}",
+                "possible_causes": ["cause-a"],
+                "suggested_checks": ["check-a"],
+                "recommended_refs": ["ref-a"],
+                "retriever_metadata": {},
+            }
+            if retriever == "chroma":
+                base["recommended_refs"] = ["ref-b"]
+            return base
+
+        argv = [
+            "compare_retrievers.py",
+            "--samples",
+            "high_cpu",
+            "--warn-threshold",
+            "0",
+            "--fail-on-warn",
+        ]
+        with patch.object(compare_retrievers, "run_case", side_effect=fake_run_case), patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()):
+            rc = compare_retrievers.main()
+        self.assertNotEqual(0, rc)
 
 
 if __name__ == "__main__":

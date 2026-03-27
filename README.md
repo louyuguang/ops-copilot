@@ -175,6 +175,13 @@ python scripts/compare_retrievers.py \
   --baseline-json reports/compare/prev.json \
   --output-json reports/compare/latest.json \
   --warn-threshold 2
+
+# 9) 当触发 warning 时在 CI 中返回非 0（可选）
+python scripts/compare_retrievers.py \
+  --baseline-json reports/compare/prev.json \
+  --output-json reports/compare/latest.json \
+  --warn-threshold 2 \
+  --fail-on-warn
 ```
 
 `compare_retrievers.py` 现在支持三层输出：
@@ -194,13 +201,17 @@ python scripts/compare_retrievers.py \
 3) 机器可读 JSON（`JSON_REPORT`）
 - 保留每个样本/每个对比对的明细
 - 追加 `comparisons[].summary` 聚合统计，便于后续自动化处理
+- 增加 `meta` 轻量元信息，包含：`run_timestamp`、`run_epoch`、`git_commit`、`args`（samples/top_k_values/simulate_chroma_down/warn_threshold/fail_on_warn 等）
+- baseline 对比覆盖统计写入 `baseline_coverage`：`baseline_missing_count`、`comparison_missing_in_baseline_count`（以及对应 name 列表）
 - 可通过 `--output-json reports/compare/latest.json` 落盘（自动创建父目录）
 
-额外能力（Day4+Day5）：
+额外能力（Day4+Day6）：
 - 轻量参数矩阵：`--top-k-values 1,3,5`（按 `local vs chroma_top_k_*` 逐组对比）
 - fallback compare 可见性：`--simulate-chroma-down`（在报告中单独加入 `local_vs_chroma_fallback`）
 - baseline 趋势对比：`--baseline-json <prev_report>`，输出 `trend_vs_baseline`（含关键聚合指标 delta）
+- baseline 覆盖统计：输出 `baseline_coverage`（`baseline_missing_count`、`comparison_missing_in_baseline_count`）并在人类可读结果中展示
 - 阈值提醒：`--warn-threshold <n>`，当 diff count 超阈值时在人类可读输出中给出 WARNING，JSON 同步写入 `warnings`
+- 可选阻断开关：`--fail-on-warn`，仅在有 warning 时返回非 0；默认不加该参数仍返回 0（非阻断）
 
 ## Docker
 

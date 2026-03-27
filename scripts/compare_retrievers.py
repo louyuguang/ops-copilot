@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -224,6 +225,39 @@ def load_json_file(path: str | None) -> dict[str, Any] | None:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def get_git_commit_hash() -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=BASE_DIR,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        value = proc.stdout.strip()
+        return value or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def build_report_meta(args: argparse.Namespace, samples: list[str], top_k_values: list[int]) -> dict[str, Any]:
+    now_utc = datetime.now(timezone.utc)
+    return {
+        "run_timestamp": now_utc.isoformat(),
+        "run_epoch": int(now_utc.timestamp()),
+        "git_commit": get_git_commit_hash(),
+        "args": {
+            "samples": samples,
+            "top_k_values": top_k_values,
+            "simulate_chroma_down": args.simulate_chroma_down,
+            "warn_threshold": args.warn_threshold,
+            "fail_on_warn": args.fail_on_warn,
+            "baseline_json": args.baseline_json,
+            "output_json": args.output_json,
+        },
+    }
+
+
 def build_trend_vs_baseline(report: dict[str, Any], baseline_report: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not baseline_report:
         return []
@@ -260,7 +294,36 @@ def build_trend_vs_baseline(report: dict[str, Any], baseline_report: dict[str, A
     return trend_rows
 
 
-def render_trend_summary(trend_rows: list[dict[str, Any]]) -> str:
+def build_baseline_coverage_stats(
+    report: dict[str, Any],
+    baseline_report: dict[str, Any] | None,
+    trend_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    baseline_missing_names = sorted(
+        [str(row.get("name")) for row in trend_rows if row.get("status") == "baseline_missing"]
+    )
+
+    comparison_names = {
+        str(item.get("name"))
+        for item in report.get("comparisons", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    baseline_names = {
+        str(item.get("name"))
+        for item in (baseline_report or {}).get("comparisons", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    comparison_missing_in_baseline_names = sorted(list(baseline_names - comparison_names))
+
+    return {
+        "baseline_missing_count": len(baseline_missing_names),
+        "baseline_missing_names": baseline_missing_names,
+        "comparison_missing_in_baseline_count": len(comparison_missing_in_baseline_names),
+        "comparison_missing_in_baseline_names": comparison_missing_in_baseline_names,
+    }
+
+
+def render_trend_summary(trend_rows: list[dict[str, Any]], coverage_stats: dict[str, Any]) -> str:
     if not trend_rows:
         return ""
 
@@ -276,6 +339,14 @@ def render_trend_summary(trend_rows: list[dict[str, Any]]) -> str:
             lines.append(
                 f"  {key}: current={row['current'][key]}, baseline={row['baseline'][key]}, delta={sign}{delta}"
             )
+
+    lines.extend(
+        [
+            "--- BASELINE_COVERAGE ---",
+            f"baseline_missing_count: {coverage_stats['baseline_missing_count']}",
+            f"comparison_missing_in_baseline_count: {coverage_stats['comparison_missing_in_baseline_count']}",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -360,25 +431,34 @@ def main() -> int:
         default=None,
         help="Warn when diff counts are greater than this threshold",
     )
+    parser.add_argument(
+        "--fail-on-warn",
+        action="store_true",
+        help="Return non-zero exit code when warnings are present",
+    )
     args = parser.parse_args()
 
     if args.warn_threshold is not None and args.warn_threshold < 0:
         raise ValueError("warn threshold must be >= 0")
 
     samples = parse_csv_values(args.samples)
+    top_k_values = parse_top_k_values(args.top_k_values)
     variants = build_variants(args)
     report: dict[str, Any] = {
+        "meta": build_report_meta(args=args, samples=samples, top_k_values=top_k_values),
         "config": {
             "samples": samples,
-            "top_k_values": parse_top_k_values(args.top_k_values),
+            "top_k_values": top_k_values,
             "simulate_chroma_down": args.simulate_chroma_down,
             "output_json": args.output_json,
             "baseline_json": args.baseline_json,
             "warn_threshold": args.warn_threshold,
+            "fail_on_warn": args.fail_on_warn,
         },
         "runs": {},
         "comparisons": [],
         "trend_vs_baseline": [],
+        "baseline_coverage": {},
         "warnings": [],
     }
     lines: list[str] = []
@@ -425,10 +505,13 @@ def main() -> int:
     trend_rows = build_trend_vs_baseline(report, baseline_report)
     report["trend_vs_baseline"] = trend_rows
 
+    coverage_stats = build_baseline_coverage_stats(report, baseline_report, trend_rows)
+    report["baseline_coverage"] = coverage_stats
+
     warnings = build_warnings(report["comparisons"], args.warn_threshold)
     report["warnings"] = warnings
 
-    trend_text = render_trend_summary(trend_rows)
+    trend_text = render_trend_summary(trend_rows, coverage_stats)
     if trend_text:
         lines.append(trend_text)
 
@@ -441,6 +524,9 @@ def main() -> int:
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
     write_json_report(report, args.output_json)
+
+    if args.fail_on_warn and warnings:
+        return 2
     return 0
 
 
