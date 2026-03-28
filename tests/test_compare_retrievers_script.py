@@ -216,7 +216,80 @@ class CompareRetrieverScriptUnitTest(unittest.TestCase):
         ]
         with patch.object(compare_retrievers, "run_case", side_effect=fake_run_case), patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()):
             rc = compare_retrievers.main()
-        self.assertNotEqual(0, rc)
+        self.assertEqual(2, rc)
+
+    def test_main_strict_baseline_exit_code(self) -> None:
+        def fake_run_case(sample: str, retriever: str, chroma_top_k=None, extra_env=None):
+            return {
+                "summary": f"summary-{sample}",
+                "possible_causes": ["cause-a"],
+                "suggested_checks": ["check-a"],
+                "recommended_refs": ["ref-a"],
+                "retriever_metadata": {},
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline_json = Path(tmpdir) / "baseline.json"
+            baseline_json.write_text(
+                json.dumps({"comparisons": [{"name": "local_vs_chroma"}, {"name": "local_vs_chroma_top_k_1"}]}),
+                encoding="utf-8",
+            )
+
+            argv = [
+                "compare_retrievers.py",
+                "--samples",
+                "high_cpu",
+                "--baseline-json",
+                str(baseline_json),
+                "--strict-baseline",
+            ]
+            with patch.object(compare_retrievers, "run_case", side_effect=fake_run_case), patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                rc = compare_retrievers.main()
+
+            self.assertEqual(3, rc)
+
+    def test_main_summary_json_written(self) -> None:
+        def fake_run_case(sample: str, retriever: str, chroma_top_k=None, extra_env=None):
+            base = {
+                "summary": f"summary-{sample}",
+                "possible_causes": ["cause-a"],
+                "suggested_checks": ["check-a"],
+                "recommended_refs": ["ref-a"],
+                "retriever_metadata": {},
+            }
+            if retriever == "chroma":
+                base["recommended_refs"] = ["ref-b"]
+            return base
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline_json = Path(tmpdir) / "baseline.json"
+            summary_json = Path(tmpdir) / "summary" / "latest-summary.json"
+            baseline_json.write_text(json.dumps({"comparisons": [{"name": "local_vs_chroma", "summary": {}}]}), encoding="utf-8")
+
+            argv = [
+                "compare_retrievers.py",
+                "--samples",
+                "high_cpu",
+                "--baseline-json",
+                str(baseline_json),
+                "--warn-threshold",
+                "0",
+                "--summary-json",
+                str(summary_json),
+            ]
+            with patch.object(compare_retrievers, "run_case", side_effect=fake_run_case), patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                rc = compare_retrievers.main()
+
+            self.assertEqual(0, rc)
+            self.assertTrue(summary_json.exists())
+            written = json.loads(summary_json.read_text(encoding="utf-8"))
+            self.assertIn("warnings", written)
+            self.assertIn("baseline_coverage", written)
+            self.assertIn("trend_vs_baseline", written)
+            self.assertIn("summary", written)
+            self.assertIn("exit", written)
+            self.assertIn("local_vs_chroma", written["summary"])
+            self.assertTrue(written["exit"]["warn_triggered"])
 
 
 if __name__ == "__main__":

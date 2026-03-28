@@ -252,8 +252,10 @@ def build_report_meta(args: argparse.Namespace, samples: list[str], top_k_values
             "simulate_chroma_down": args.simulate_chroma_down,
             "warn_threshold": args.warn_threshold,
             "fail_on_warn": args.fail_on_warn,
+            "strict_baseline": args.strict_baseline,
             "baseline_json": args.baseline_json,
             "output_json": args.output_json,
+            "summary_json": args.summary_json,
         },
     }
 
@@ -398,6 +400,42 @@ def write_json_report(report: dict[str, Any], output_json: str | None) -> None:
     output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def build_summary_report(report: dict[str, Any], strict_baseline: bool, fail_on_warn: bool) -> dict[str, Any]:
+    baseline_coverage = report.get("baseline_coverage", {})
+    warnings = report.get("warnings", [])
+    strict_baseline_triggered = (
+        int(baseline_coverage.get("baseline_missing_count", 0)) > 0
+        or int(baseline_coverage.get("comparison_missing_in_baseline_count", 0)) > 0
+    )
+    warn_triggered = bool(warnings)
+
+    return {
+        "warnings": warnings,
+        "baseline_coverage": baseline_coverage,
+        "trend_vs_baseline": report.get("trend_vs_baseline", []),
+        "summary": {
+            item.get("name", "unknown"): item.get("summary", {})
+            for item in report.get("comparisons", [])
+            if isinstance(item, dict)
+        },
+        "exit": {
+            "strict_baseline_enabled": strict_baseline,
+            "strict_baseline_triggered": strict_baseline_triggered,
+            "fail_on_warn_enabled": fail_on_warn,
+            "warn_triggered": warn_triggered,
+            "should_fail": (strict_baseline and strict_baseline_triggered) or (fail_on_warn and warn_triggered),
+        },
+    }
+
+
+def write_summary_report(summary_report: dict[str, Any], summary_json: str | None) -> None:
+    if not summary_json:
+        return
+    output_path = Path(summary_json)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(summary_report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare local/chroma retrievers")
     parser.add_argument(
@@ -436,6 +474,19 @@ def main() -> int:
         action="store_true",
         help="Return non-zero exit code when warnings are present",
     )
+    parser.add_argument(
+        "--strict-baseline",
+        action="store_true",
+        help=(
+            "Return non-zero exit code when baseline coverage has missing comparisons "
+            "(baseline_missing_count > 0 or comparison_missing_in_baseline_count > 0)"
+        ),
+    )
+    parser.add_argument(
+        "--summary-json",
+        default=None,
+        help="Write concise machine-readable summary JSON artifact to file path",
+    )
     args = parser.parse_args()
 
     if args.warn_threshold is not None and args.warn_threshold < 0:
@@ -451,9 +502,11 @@ def main() -> int:
             "top_k_values": top_k_values,
             "simulate_chroma_down": args.simulate_chroma_down,
             "output_json": args.output_json,
+            "summary_json": args.summary_json,
             "baseline_json": args.baseline_json,
             "warn_threshold": args.warn_threshold,
             "fail_on_warn": args.fail_on_warn,
+            "strict_baseline": args.strict_baseline,
         },
         "runs": {},
         "comparisons": [],
@@ -525,7 +578,16 @@ def main() -> int:
 
     write_json_report(report, args.output_json)
 
-    if args.fail_on_warn and warnings:
+    summary_report = build_summary_report(
+        report=report,
+        strict_baseline=args.strict_baseline,
+        fail_on_warn=args.fail_on_warn,
+    )
+    write_summary_report(summary_report, args.summary_json)
+
+    if args.strict_baseline and summary_report["exit"]["strict_baseline_triggered"]:
+        return 3
+    if args.fail_on_warn and summary_report["exit"]["warn_triggered"]:
         return 2
     return 0
 

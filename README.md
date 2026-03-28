@@ -182,6 +182,15 @@ python scripts/compare_retrievers.py \
   --output-json reports/compare/latest.json \
   --warn-threshold 2 \
   --fail-on-warn
+
+# 10) 推荐 CI / regression 命令模板（含精简摘要 + baseline 严格校验）
+python scripts/compare_retrievers.py \
+  --baseline-json reports/compare/prev.json \
+  --output-json reports/compare/latest.json \
+  --summary-json reports/compare/latest-summary.json \
+  --warn-threshold 2 \
+  --fail-on-warn \
+  --strict-baseline
 ```
 
 `compare_retrievers.py` 现在支持三层输出：
@@ -201,9 +210,14 @@ python scripts/compare_retrievers.py \
 3) 机器可读 JSON（`JSON_REPORT`）
 - 保留每个样本/每个对比对的明细
 - 追加 `comparisons[].summary` 聚合统计，便于后续自动化处理
-- 增加 `meta` 轻量元信息，包含：`run_timestamp`、`run_epoch`、`git_commit`、`args`（samples/top_k_values/simulate_chroma_down/warn_threshold/fail_on_warn 等）
+- 增加 `meta` 轻量元信息，包含：`run_timestamp`、`run_epoch`、`git_commit`、`args`（samples/top_k_values/simulate_chroma_down/warn_threshold/fail_on_warn/strict_baseline 等）
 - baseline 对比覆盖统计写入 `baseline_coverage`：`baseline_missing_count`、`comparison_missing_in_baseline_count`（以及对应 name 列表）
 - 可通过 `--output-json reports/compare/latest.json` 落盘（自动创建父目录）
+
+4) 精简机器可读摘要（`--summary-json`）
+- 单独输出关键字段：`warnings`、`baseline_coverage`、`trend_vs_baseline`、`summary` 聚合视图
+- 提供 `exit` 语义字段（strict-baseline / fail-on-warn 的触发信息），便于 CI 直接判定
+- 可通过 `--summary-json reports/compare/latest-summary.json` 落盘（自动创建父目录）
 
 额外能力（Day4+Day6）：
 - 轻量参数矩阵：`--top-k-values 1,3,5`（按 `local vs chroma_top_k_*` 逐组对比）
@@ -211,7 +225,9 @@ python scripts/compare_retrievers.py \
 - baseline 趋势对比：`--baseline-json <prev_report>`，输出 `trend_vs_baseline`（含关键聚合指标 delta）
 - baseline 覆盖统计：输出 `baseline_coverage`（`baseline_missing_count`、`comparison_missing_in_baseline_count`）并在人类可读结果中展示
 - 阈值提醒：`--warn-threshold <n>`，当 diff count 超阈值时在人类可读输出中给出 WARNING，JSON 同步写入 `warnings`
-- 可选阻断开关：`--fail-on-warn`，仅在有 warning 时返回非 0；默认不加该参数仍返回 0（非阻断）
+- 可选阻断开关：`--fail-on-warn`，仅在有 warning 时返回非 0（exit code 2）；默认不加该参数仍返回 0（非阻断）
+- baseline 严格校验：`--strict-baseline`，当 baseline 覆盖存在缺口（`baseline_missing_count > 0` 或 `comparison_missing_in_baseline_count > 0`）时返回非 0（exit code 3）
+- CI 精简摘要：`--summary-json <path>`，输出可直接被 CI / regression 读取的关键字段（自动创建父目录）
 
 ## Docker
 
