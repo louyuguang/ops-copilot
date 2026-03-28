@@ -298,13 +298,13 @@ python scripts/compare_retrievers.py \
 - baseline 严格校验：`--strict-baseline`，当 baseline 覆盖存在缺口（`baseline_missing_count > 0` 或 `comparison_missing_in_baseline_count > 0`）时返回非 0（exit code 3）
 - CI 精简摘要：`--summary-json <path>`，输出可直接被 CI / regression 读取的关键字段（自动创建父目录）
 
-## 场景矩阵回归（Week5 Day5 轻量入口）
+## 场景矩阵回归（Week5 Day6：baseline compare + 最小 gate）
 
-新增脚本：`scripts/scenario_matrix_regression.py`
+脚本：`scripts/scenario_matrix_regression.py`
 
-用途：把 Day1~Day4 的配置/错误语义/重试与 fallback 聚合语义，固化成固定 case 的轻量回归资产。
+用途：把 Day1~Day4 的配置/错误语义/重试与 fallback 聚合语义，固化成固定 case 的轻量回归资产，并提供 baseline 对比与最小 gate 能力。
 
-运行方式：
+### 1) 仅跑 scenario regression（生成 latest）
 
 ```bash
 export PYTHONPATH=src
@@ -313,21 +313,68 @@ python scripts/scenario_matrix_regression.py
 python scripts/scenario_matrix_regression.py --output-json reports/eval/scenario-matrix-latest.json
 ```
 
-默认覆盖 case：
+### 2) 与 baseline 对比（生成 diff）
+
+```bash
+# 假设 baseline 已存在
+python scripts/scenario_matrix_regression.py \
+  --output-json reports/eval/scenario-matrix-latest.json \
+  --baseline-json reports/eval/scenario-matrix-baseline.json \
+  --diff-json reports/eval/scenario-matrix-diff.json
+```
+
+建议工件命名：
+- `reports/eval/scenario-matrix-latest.json`
+- `reports/eval/scenario-matrix-baseline.json`
+- `reports/eval/scenario-matrix-diff.json`
+
+### 3) warning / fail gate 语义
+
+```bash
+python scripts/scenario_matrix_regression.py \
+  --output-json reports/eval/scenario-matrix-latest.json \
+  --baseline-json reports/eval/scenario-matrix-baseline.json \
+  --diff-json reports/eval/scenario-matrix-diff.json \
+  --warn-threshold 0 \
+  --fail-on-warn
+```
+
+- `warnings`：diff 中的结构化告警列表（包含 case 缺失、字段变化）
+- `summary.warning_count`：warning 总数
+- `--warn-threshold <n>`：当 `warning_count > n` 时，`gate.warn_triggered=true`
+- `--fail-on-warn`：若 `warn_triggered=true`，进程返回非 0（exit code 2）；否则返回 0
+
+### 默认覆盖 case
 - `llm_key_missing`
 - `llm_call_failed_after_retry`
 - `chroma_down`
 - `retrieval_empty`
 
-输出工件（JSON，默认 `reports/eval/scenario-matrix-latest.json`）核心字段：
-- case 级：`run_status`、`had_fallback`、`fallback_count`、`had_retry`、`total_retry_count`
-- 路径级：`primary_path`、`effective_path`
-- 错误/决策：`error_type`、`path_decision`（并保留 `decisions` 原始聚合）
-- 汇总级：`summary.case_count`、`summary.fallback_cases`、`summary.retry_cases`
+### case 对比关键字段（latest vs baseline）
+- `run_status`
+- `had_fallback`
+- `fallback_count`
+- `had_retry`
+- `total_retry_count`
+- `primary_path`
+- `effective_path`
+- `path_decision`
+- `error_type`
+
+### 输出工件核心结构
+- latest（`scenario-matrix-latest.json`）
+  - case 级：`run_status`、`had_fallback`、`fallback_count`、`had_retry`、`total_retry_count`
+  - 路径级：`primary_path`、`effective_path`
+  - 错误/决策：`error_type`、`path_decision`（并保留 `decisions` 原始聚合）
+- diff（`scenario-matrix-diff.json`）
+  - `compare_fields`
+  - `cases[case].status` + `cases[case].field_diffs`
+  - `warnings`
+  - `summary.warning_count`
+  - `gate`（`warn_threshold` / `fail_on_warn` / `warn_triggered` / `should_fail` / `exit_code`）
 
 与 compare / regression gate 的关系：
 - 该入口聚焦“固定语义场景是否还成立”，输出结构稳定、可直接供 CI 或 compare 脚本读取。
-- 可把本次产物作为 baseline，在后续 Day6 gate 中做字段级对比（例如 fallback/retry 语义是否回归）。
 - 与 `compare_retrievers.py` 互补：
   - `compare_retrievers.py` 关注 local/chroma 结果差异趋势
   - `scenario_matrix_regression.py` 关注错误语义 + 决策路径语义是否稳定
