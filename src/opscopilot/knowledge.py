@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+from .config import ConfigError, resolve_positive_int
 from .models import IncidentEvent
 
 
@@ -114,9 +115,21 @@ class ChromaSettings:
 
     @classmethod
     def from_env(cls) -> "ChromaSettings":
+        port_raw = os.getenv("CHROMA_PORT", "18000").strip() or "18000"
+        try:
+            port = int(port_raw)
+        except ValueError as exc:
+            raise ConfigError(
+                f"Invalid CHROMA_PORT={port_raw!r}. It must be an integer, e.g. 18000."
+            ) from exc
+        if port <= 0:
+            raise ConfigError(
+                f"Invalid CHROMA_PORT={port_raw!r}. It must be > 0, e.g. 18000."
+            )
+
         return cls(
             host=os.getenv("CHROMA_HOST", "localhost").strip() or "localhost",
-            port=int((os.getenv("CHROMA_PORT", "18000").strip() or "18000")),
+            port=port,
             tenant=os.getenv("CHROMA_TENANT", "default_tenant").strip() or "default_tenant",
             database=(
                 os.getenv("CHROMA_DATABASE", "default_database").strip() or "default_database"
@@ -265,7 +278,7 @@ class ChromaCardRetriever:
                 "matched_cards": [],
                 "returned_count": 0,
                 "fallback": True,
-                "fallback_reason": f"chroma_error:{exc.__class__.__name__}",
+                "fallback_reason": f"chroma_unavailable:{exc}",
                 "collection": self.settings.collection,
                 "endpoint": f"{self.settings.host}:{self.settings.port}",
             }
@@ -279,12 +292,13 @@ class ChromaCardRetriever:
 
 
 def _read_top_k_from_env(default: int = 3) -> int:
-    raw = (os.getenv("CHROMA_TOP_K", str(default)) or str(default)).strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
+    # No CLI override here. This helper is only used when caller chooses env/default path.
+    return resolve_positive_int(
+        cli_value=None,
+        env=os.environ,
+        env_name="CHROMA_TOP_K",
+        default=default,
+    )
 
 
 def build_cards_index(cards_dir: Path, api: ChromaHttpAPI, embedder: SimpleHashEmbedder) -> int:

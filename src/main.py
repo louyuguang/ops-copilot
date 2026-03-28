@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 from opscopilot import (
@@ -16,19 +17,11 @@ from opscopilot import (
     load_event,
     result_to_dict,
 )
+from opscopilot.config import ConfigError, resolve_runtime_config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CARDS_DIR = BASE_DIR / "docs" / "cards"
 SAMPLES_DIR = BASE_DIR / "samples" / "incidents"
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = (os.getenv(name, str(default)) or str(default)).strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,27 +35,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         choices=["rule", "llm"],
-        default=os.getenv("ANALYSIS_MODE", "rule"),
-        help="Analysis mode: rule (baseline) or llm",
+        default=None,
+        help="Analysis mode. Priority: CLI > env ANALYSIS_MODE > default(rule)",
     )
     parser.add_argument(
         "--retriever",
         choices=["local", "chroma"],
-        default=os.getenv("RETRIEVER_MODE", "local"),
-        help="Retriever mode: local (default) or chroma",
+        default=None,
+        help="Retriever mode. Priority: CLI > env RETRIEVER_MODE > default(local)",
     )
     parser.add_argument(
         "--chroma-top-k",
         type=int,
-        default=_env_int("CHROMA_TOP_K", 3),
-        help="Top K docs for Chroma retrieval (default from CHROMA_TOP_K or 3)",
+        default=None,
+        help="Chroma Top-K. Priority: CLI > env CHROMA_TOP_K > default(3)",
     )
     return parser.parse_args()
 
 
-def build_generator(mode: str):
+def build_generator(mode: str, *, runtime_config) -> RuleBasedAnalyzer | LLMAnalyzer:
     if mode == "llm":
-        return LLMAnalyzer.from_env()
+        return LLMAnalyzer.from_runtime_config(runtime_config)
     return RuleBasedAnalyzer()
 
 
@@ -86,11 +79,25 @@ def main() -> int:
         logging.basicConfig(level=logging.INFO)
 
     args = parse_args()
+    try:
+        runtime_config = resolve_runtime_config(
+            cli_analysis_mode=args.mode,
+            cli_retriever_mode=args.retriever,
+            cli_chroma_top_k=args.chroma_top_k,
+            env=os.environ,
+        )
+    except ConfigError as exc:
+        print(f"[config_error] {exc}", file=sys.stderr)
+        return 2
+
+    for warning in runtime_config.warnings:
+        logging.warning("[config_warning] %s", warning)
+
     event = load_event(args.event)
 
     pipeline = IncidentAnalysisPipeline(
-        retriever=build_retriever(args.retriever, args.chroma_top_k),
-        generator=build_generator(args.mode),
+        retriever=build_retriever(runtime_config.retriever_mode, runtime_config.chroma_top_k),
+        generator=build_generator(runtime_config.analysis_mode, runtime_config=runtime_config),
     )
     result = pipeline.run(event)
 
@@ -98,13 +105,14 @@ def main() -> int:
 
     if _debug_enabled():
         debug_meta = {
-            "mode": args.mode,
-            "retriever": args.retriever,
-            "chroma_top_k": args.chroma_top_k,
-            "llm_requested": args.mode == "llm",
+            "mode": runtime_config.analysis_mode,
+            "retriever": runtime_config.retriever_mode,
+            "chroma_top_k": runtime_config.chroma_top_k,
+            "llm_requested": runtime_config.analysis_mode == "llm",
             "pipeline": pipeline.last_run_metadata,
+            "config_warnings": list(runtime_config.warnings),
         }
-        print(json.dumps(debug_meta, ensure_ascii=False), file=os.sys.stderr)
+        print(json.dumps(debug_meta, ensure_ascii=False), file=sys.stderr)
 
     return 0
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+from .config import RuntimeConfig
 from .models import AnalysisResult, IncidentEvent
 from .rule_engine import RuleBasedAnalyzer
 
@@ -28,8 +29,21 @@ class OpenAISettings:
         if not api_key:
             return None
         model = os.getenv("OPENAI_MODEL", "gpt-5.4").strip() or "gpt-5.4"
-        base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip() or "https://api.openai.com/v1"
+        base_url = (
+            os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
+            or "https://api.openai.com/v1"
+        )
         return cls(api_key=api_key, model=model, base_url=base_url)
+
+    @classmethod
+    def from_runtime_config(cls, config: RuntimeConfig) -> "OpenAISettings | None":
+        if not config.openai_api_key:
+            return None
+        return cls(
+            api_key=config.openai_api_key,
+            model=config.openai_model,
+            base_url=config.openai_base_url,
+        )
 
 
 class PromptTemplateStore:
@@ -109,6 +123,11 @@ class LLMAnalyzer:
         settings = OpenAISettings.from_env()
         return cls(client=OpenAIChatClient(settings) if settings else None)
 
+    @classmethod
+    def from_runtime_config(cls, config: RuntimeConfig) -> "LLMAnalyzer":
+        settings = OpenAISettings.from_runtime_config(config)
+        return cls(client=OpenAIChatClient(settings) if settings else None)
+
     def generate(self, event: IncidentEvent, context: str) -> AnalysisResult:
         rule_result = self.fallback_analyzer.generate(event, context)
 
@@ -123,7 +142,7 @@ class LLMAnalyzer:
 
         if self.client is None:
             metadata["fallback"] = True
-            metadata["fallback_reason"] = "llm_not_configured"
+            metadata["fallback_reason"] = "llm_api_key_missing"
             self.last_metadata = metadata
             logger.info("LLM skipped, using rule fallback: %s", metadata)
             return rule_result
