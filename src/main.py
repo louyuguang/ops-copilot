@@ -13,6 +13,7 @@ from opscopilot import (
     IncidentAnalysisPipeline,
     LLMAnalyzer,
     LocalCardRetriever,
+    OpsCopilotError,
     RuleBasedAnalyzer,
     load_event,
     result_to_dict,
@@ -93,13 +94,22 @@ def main() -> int:
     for warning in runtime_config.warnings:
         logging.warning("[config_warning] %s", warning)
 
-    event = load_event(args.event)
-
-    pipeline = IncidentAnalysisPipeline(
-        retriever=build_retriever(runtime_config.retriever_mode, runtime_config.chroma_top_k),
-        generator=build_generator(runtime_config.analysis_mode, runtime_config=runtime_config),
-    )
-    result = pipeline.run(event)
+    try:
+        event = load_event(args.event)
+        pipeline = IncidentAnalysisPipeline(
+            retriever=build_retriever(runtime_config.retriever_mode, runtime_config.chroma_top_k),
+            generator=build_generator(runtime_config.analysis_mode, runtime_config=runtime_config),
+        )
+        result = pipeline.run(event)
+    except ConfigError as exc:
+        print(f"[config_error] {exc}", file=sys.stderr)
+        return 2
+    except OpsCopilotError as exc:
+        print(f"[{exc.error_type}] {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:
+        print(f"[runtime_error] {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return 3
 
     print(json.dumps(result_to_dict(result), ensure_ascii=False, indent=2))
 
@@ -110,6 +120,7 @@ def main() -> int:
             "chroma_top_k": runtime_config.chroma_top_k,
             "llm_requested": runtime_config.analysis_mode == "llm",
             "pipeline": pipeline.last_run_metadata,
+            "run_status": pipeline.last_run_metadata.get("run_status", "unknown"),
             "config_warnings": list(runtime_config.warnings),
         }
         print(json.dumps(debug_meta, ensure_ascii=False), file=sys.stderr)

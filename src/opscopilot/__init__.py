@@ -1,3 +1,10 @@
+from .errors import (
+    ExternalDependencyError,
+    LLMCallError,
+    OpsCopilotError,
+    OutputParseError,
+    RetrievalEmptyError,
+)
 from .io import load_event, result_to_dict
 from .knowledge import (
     ChromaCardRetriever,
@@ -20,4 +27,9 @@ __all__ = [
     "RuleBasedAnalyzer",
     "LLMAnalyzer",
     "OpenAISettings",
+    "OpsCopilotError",
+    "ExternalDependencyError",
+    "RetrievalEmptyError",
+    "LLMCallError",
+    "OutputParseError",
 ]

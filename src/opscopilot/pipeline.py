@@ -18,10 +18,20 @@ class IncidentAnalysisPipeline:
         context_text, refs = self.retriever.fetch(event)
         result = self.generator.generate(event, context_text)
 
+        retriever_meta = getattr(self.retriever, "last_metadata", {})
+        generator_meta = getattr(self.generator, "last_metadata", {})
+
+        run_status = "success"
+        if retriever_meta.get("fallback") or generator_meta.get("fallback"):
+            run_status = "degraded_success"
+        elif retriever_meta.get("retrieval_status") == "empty":
+            run_status = "empty_retrieval_continue"
+
         self.last_run_metadata = {
             "event_type": event.event_type,
-            "retriever": getattr(self.retriever, "last_metadata", {}),
-            "generator": getattr(self.generator, "last_metadata", {}),
+            "run_status": run_status,
+            "retriever": retriever_meta,
+            "generator": generator_meta,
         }
 
         return AnalysisResult(

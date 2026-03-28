@@ -5,6 +5,7 @@ import unittest
 
 from opscopilot.io import load_event
 from opscopilot.knowledge import ChromaCardRetriever, LocalCardRetriever
+from opscopilot.errors import OutputParseError
 from opscopilot.llm_engine import LLMAnalyzer
 from opscopilot.pipeline import IncidentAnalysisPipeline
 from opscopilot.models import IncidentEvent
@@ -34,6 +35,12 @@ class FailingClient:
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
         _ = (system_prompt, user_prompt)
         raise RuntimeError("boom")
+
+
+class ParseFailingClient:
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        _ = (system_prompt, user_prompt)
+        raise OutputParseError("bad_json")
 
 
 class FakeChromaAPI:
@@ -111,6 +118,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(["需要补充标准排查项"], result.suggested_checks)
         self.assertEqual([], result.recommended_refs)
         self.assertFalse(pipeline.last_run_metadata["retriever"].get("card_found"))
+        self.assertEqual("empty_retrieval_continue", pipeline.last_run_metadata.get("run_status"))
 
     def test_llm_fallback_when_client_failed(self) -> None:
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
@@ -126,7 +134,26 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("high_cpu", result.summary)
         metadata = pipeline.last_run_metadata["generator"]
         self.assertTrue(metadata.get("fallback"))
-        self.assertEqual("llm_error:RuntimeError", metadata.get("fallback_reason"))
+        self.assertEqual("llm_unexpected_error:RuntimeError", metadata.get("fallback_reason"))
+        self.assertEqual("llm_unexpected_error", metadata.get("error_type"))
+        self.assertEqual("degraded_success", pipeline.last_run_metadata.get("run_status"))
+
+    def test_llm_fallback_when_output_parse_failed(self) -> None:
+        event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
+        cards_dir = BASE_DIR / "docs" / "cards"
+
+        event = load_event(event_path)
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(cards_dir),
+            LLMAnalyzer(client=ParseFailingClient()),
+        )
+        result = pipeline.run(event)
+
+        self.assertIn("high_cpu", result.summary)
+        metadata = pipeline.last_run_metadata["generator"]
+        self.assertTrue(metadata.get("fallback"))
+        self.assertEqual("llm_output_parse_failed", metadata.get("fallback_reason"))
+        self.assertEqual("output_parse_failed", metadata.get("error_type"))
 
     def test_chroma_retriever_returns_context(self) -> None:
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"

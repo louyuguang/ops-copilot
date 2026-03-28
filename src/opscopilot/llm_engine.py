@@ -9,6 +9,7 @@ from typing import Any
 from urllib import error, request
 
 from .config import RuntimeConfig
+from .errors import LLMCallError, OutputParseError
 from .models import AnalysisResult, IncidentEvent
 from .rule_engine import RuleBasedAnalyzer
 
@@ -91,13 +92,13 @@ class OpenAIChatClient:
             with request.urlopen(req, timeout=self.settings.timeout_seconds) as resp:
                 raw = json.loads(resp.read().decode("utf-8"))
         except error.URLError as exc:
-            raise RuntimeError(f"LLM request failed: {exc}") from exc
+            raise LLMCallError(f"LLM request failed: {exc}") from exc
 
         content = raw.get("choices", [{}])[0].get("message", {}).get("content", "{}")
         try:
             return json.loads(content)
         except json.JSONDecodeError as exc:
-            raise RuntimeError("LLM returned non-JSON content") from exc
+            raise OutputParseError("LLM returned non-JSON content") from exc
 
 
 class LLMAnalyzer:
@@ -138,11 +139,15 @@ class LLMAnalyzer:
             "llm_used": False,
             "fallback": False,
             "fallback_reason": None,
+            "error_type": None,
+            "error_message": None,
         }
 
         if self.client is None:
             metadata["fallback"] = True
             metadata["fallback_reason"] = "llm_api_key_missing"
+            metadata["error_type"] = "config_error"
+            metadata["error_message"] = "OPENAI_API_KEY is missing"
             self.last_metadata = metadata
             logger.info("LLM skipped, using rule fallback: %s", metadata)
             return rule_result
@@ -166,9 +171,27 @@ class LLMAnalyzer:
             self.last_metadata = metadata
             logger.info("LLM analyze success: %s", metadata)
             return result
+        except OutputParseError as exc:
+            metadata["fallback"] = True
+            metadata["fallback_reason"] = "llm_output_parse_failed"
+            metadata["error_type"] = exc.error_type
+            metadata["error_message"] = str(exc)
+            self.last_metadata = metadata
+            logger.warning("LLM output parse failed, using fallback: %s", metadata)
+            return rule_result
+        except LLMCallError as exc:
+            metadata["fallback"] = True
+            metadata["fallback_reason"] = "llm_call_failed"
+            metadata["error_type"] = exc.error_type
+            metadata["error_message"] = str(exc)
+            self.last_metadata = metadata
+            logger.warning("LLM call failed, using fallback: %s", metadata)
+            return rule_result
         except Exception as exc:
             metadata["fallback"] = True
-            metadata["fallback_reason"] = f"llm_error:{exc.__class__.__name__}"
+            metadata["fallback_reason"] = f"llm_unexpected_error:{exc.__class__.__name__}"
+            metadata["error_type"] = "llm_unexpected_error"
+            metadata["error_message"] = str(exc)
             self.last_metadata = metadata
             logger.warning("LLM analyze failed, using fallback: %s", metadata)
             return rule_result
@@ -218,6 +241,9 @@ class LLMAnalyzer:
         llm_data: dict[str, Any],
         fallback: AnalysisResult,
     ) -> AnalysisResult:
+        if not isinstance(llm_data, dict):
+            raise OutputParseError("LLM JSON payload must be an object")
+
         summary = str(llm_data.get("summary") or fallback.summary)
         causes = self._clean_list(llm_data.get("possible_causes"), fallback.possible_causes)
         checks = self._clean_list(llm_data.get("suggested_checks"), fallback.suggested_checks)

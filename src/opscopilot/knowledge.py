@@ -10,6 +10,7 @@ from typing import Any
 from urllib import error, request
 
 from .config import ConfigError, resolve_positive_int
+from .errors import ExternalDependencyError
 from .models import IncidentEvent
 
 
@@ -37,6 +38,8 @@ class LocalCardRetriever:
                 "returned_count": 0,
                 "fallback": False,
                 "fallback_reason": None,
+                "retrieval_status": "empty",
+                "error_type": "retrieval_empty",
                 "card_found": False,
                 "card_path": str(card_path),
             }
@@ -55,6 +58,8 @@ class LocalCardRetriever:
             "returned_count": 1,
             "fallback": False,
             "fallback_reason": None,
+            "retrieval_status": "ok",
+            "error_type": None,
             "card_found": True,
             "card_path": str(card_path),
         }
@@ -201,9 +206,9 @@ class ChromaHttpAPI:
             return json.loads(body) if body else {}
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8")
-            raise RuntimeError(f"chroma_request_failed:{exc.code}:{detail}") from exc
+            raise ExternalDependencyError(f"chroma_request_failed:{exc.code}:{detail}") from exc
         except error.URLError as exc:
-            raise RuntimeError(f"chroma_request_failed:{exc}") from exc
+            raise ExternalDependencyError(f"chroma_request_failed:{exc}") from exc
 
 
 class ChromaCardRetriever:
@@ -252,6 +257,7 @@ class ChromaCardRetriever:
                 )
 
             context = "\n\n---\n\n".join(str(x) for x in documents if str(x).strip())
+            returned_count = len(hits)
             self.last_metadata = {
                 "mode": "chroma",
                 "query": query,
@@ -260,14 +266,21 @@ class ChromaCardRetriever:
                 "top_k": self.top_k,
                 "retrieved_context_len": len(context),
                 "matched_cards": hits,
-                "returned_count": len(refs),
+                "returned_count": returned_count,
                 "fallback": False,
                 "fallback_reason": None,
+                "retrieval_status": "empty" if returned_count == 0 else "ok",
+                "error_type": "retrieval_empty" if returned_count == 0 else None,
                 "collection": self.settings.collection,
                 "endpoint": f"{self.settings.host}:{self.settings.port}",
             }
             return context, refs
         except Exception as exc:
+            error_type = (
+                exc.error_type
+                if hasattr(exc, "error_type")
+                else "external_dependency_error"
+            )
             self.last_metadata = {
                 "mode": "chroma",
                 "query": query,
@@ -278,7 +291,9 @@ class ChromaCardRetriever:
                 "matched_cards": [],
                 "returned_count": 0,
                 "fallback": True,
-                "fallback_reason": f"chroma_unavailable:{exc}",
+                "fallback_reason": "chroma_unavailable",
+                "error_type": error_type,
+                "error_message": str(exc),
                 "collection": self.settings.collection,
                 "endpoint": f"{self.settings.host}:{self.settings.port}",
             }

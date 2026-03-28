@@ -74,6 +74,7 @@ class ConfigBehaviorTest(unittest.TestCase):
 
         self.assertIn("high_cpu", result.summary)
         self.assertEqual("llm_api_key_missing", analyzer.last_metadata.get("fallback_reason"))
+        self.assertEqual("config_error", analyzer.last_metadata.get("error_type"))
 
     def test_chroma_top_k_env_invalid_raises_on_retriever_init(self) -> None:
         prev = os.environ.get("CHROMA_TOP_K")
