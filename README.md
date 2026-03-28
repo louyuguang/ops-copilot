@@ -379,6 +379,94 @@ python scripts/scenario_matrix_regression.py \
   - `compare_retrievers.py` 关注 local/chroma 结果差异趋势
   - `scenario_matrix_regression.py` 关注错误语义 + 决策路径语义是否稳定
 
+### baseline 更新策略（最小可执行约定）
+
+目标：既能吸收“预期变化”，又避免 baseline 漂移把真实回归掩盖掉。
+
+1) 什么时候更新 baseline
+- 仅在以下条件同时满足时更新：
+  - 变更已通过 code review；
+  - `scenario_matrix_regression.py` 的 diff 已人工确认“变化符合预期”；
+  - 该变化属于“语义升级/设计调整”，不是偶发波动。
+- 不在“为了让 CI 变绿”时直接覆盖 baseline。
+
+2) 谁/如何更新
+- 谁：默认由提交该语义变更的 owner 更新，reviewer 二次确认。
+- 如何（建议固定命令）：
+
+```bash
+export PYTHONPATH=src
+python scripts/scenario_matrix_regression.py \
+  --output-json reports/eval/scenario-matrix-latest.json \
+  --baseline-json reports/eval/scenario-matrix-baseline.json \
+  --diff-json reports/eval/scenario-matrix-diff.json
+
+# 人工确认 diff 后再覆盖 baseline
+cp reports/eval/scenario-matrix-latest.json reports/eval/scenario-matrix-baseline.json
+```
+
+3) 如何避免 baseline 漂移
+- baseline 更新与代码变更放在同一个 PR，且在 PR 描述里列出：`changed case` / `changed fields` / `原因`。
+- 对“已知可接受但短期不想改 baseline”的变化，优先用白名单而非直接改 baseline：
+  - `--allow-field-change case:field`
+- 周内最多一次批量 baseline 更新（除紧急修复外），避免碎片化漂移。
+
+### diff / gate 人类可读摘要（Day7 收口）
+
+在 baseline compare 模式下，脚本会额外输出 `SCENARIO_MATRIX_DIFF_SUMMARY`，快速展示：
+- changed case 数
+- warning 列表（case + field + baseline/latest）
+- allowed change 列表
+- gate 结果（warn_triggered / should_fail / exit_code）
+
+示例命令：
+
+```bash
+python scripts/scenario_matrix_regression.py \
+  --output-json reports/eval/scenario-matrix-latest.json \
+  --baseline-json reports/eval/scenario-matrix-baseline.json \
+  --diff-json reports/eval/scenario-matrix-diff.json \
+  --warn-threshold 0 \
+  --fail-on-warn \
+  --allow-field-change llm_key_missing:had_fallback
+```
+
+### `--allow-field-change` 最小白名单机制（Day7）
+
+用途：允许少量“已知且可接受”的字段变化不再持续触发 gate 阻断。
+
+- 参数可重复：`--allow-field-change case:field`
+- 被允许的变化会进入 diff artifact 的 `allowed_changes`
+- 这类变化不会计入 `warnings`，也不会触发 `fail-on-warn`
+- 仍保留审计可见性（`summary.allowed_change_count` + `cases[].allowed_field_diffs`）
+
+示例：
+
+```bash
+python scripts/scenario_matrix_regression.py \
+  --baseline-json reports/eval/scenario-matrix-baseline.json \
+  --allow-field-change llm_key_missing:had_fallback \
+  --allow-field-change chroma_down:total_retry_count
+```
+
+## Week5 工程化收口总结（Day1~Day7）
+
+Week5 已完成并串联为可交付链路：
+- Day1: 配置入口统一（CLI > ENV > 默认）+ typed config 校验
+- Day2: 错误语义标准化（`config_error` / `external_dependency_error` / `retrieval_empty` / `llm_call_failed` / `output_parse_failed`）
+- Day3: timeout/retry 明确语义与 metadata
+- Day4: fallback 语义统一 + pipeline 聚合态（`run_status` / `had_fallback` / `had_retry` / `effective_path`）
+- Day5: compare 报告能力增强（trend/warning/fail gate/summary artifact）
+- Day6: scenario matrix regression + baseline compare + 最小 gate
+- Day7: baseline 更新策略 + 人类可读 diff 摘要 + 最小变化白名单机制
+
+如何理解关键字段：
+- `run_status`：主流程结果态（success/degraded_success/empty_retrieval_continue）
+- `had_fallback` / `fallback_count`：是否及发生了多少次降级
+- `had_retry` / `total_retry_count`：是否及累计重试次数
+- `path_decision` / `effective_path`：本次最终走了哪条语义路径
+- diff/gate：基于 scenario baseline 对比得到的结构化 warning 与阻断结论
+
 ## Docker
 
 构建镜像：

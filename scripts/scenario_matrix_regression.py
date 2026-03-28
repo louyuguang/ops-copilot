@@ -152,7 +152,7 @@ def run_scenario_matrix() -> dict[str, Any]:
     report = {
         "meta": {
             "suite": "scenario_matrix_regression",
-            "version": "week5-day6-v1",
+            "version": "week5-day7-v1",
             "run_timestamp": now_utc.isoformat(),
             "run_epoch": int(now_utc.timestamp()),
             "git_commit": get_git_commit_hash(),
@@ -202,17 +202,37 @@ def _json_equivalent(left: Any, right: Any) -> bool:
     )
 
 
+def _parse_allow_field_change(raw_items: list[str]) -> set[tuple[str, str]]:
+    parsed: set[tuple[str, str]] = set()
+    for raw in raw_items:
+        text = (raw or "").strip()
+        if not text:
+            continue
+        if ":" not in text:
+            raise ValueError(f"Invalid allow-field-change {raw!r}, expected format: case:field")
+        case_name, field_name = text.split(":", 1)
+        case_name = case_name.strip()
+        field_name = field_name.strip()
+        if not case_name or not field_name:
+            raise ValueError(f"Invalid allow-field-change {raw!r}, expected format: case:field")
+        parsed.add((case_name, field_name))
+    return parsed
+
+
 def compare_with_baseline(
     latest_report: dict[str, Any],
     baseline_report: dict[str, Any],
     warn_threshold: int | None,
     fail_on_warn: bool,
+    allow_field_changes: set[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     latest_cases = latest_report.get("cases", {})
     baseline_cases = baseline_report.get("cases", {})
     case_names = sorted(set(latest_cases.keys()) | set(baseline_cases.keys()))
+    allow_field_changes = allow_field_changes or set()
 
     warnings: list[dict[str, Any]] = []
+    allowed_changes: list[dict[str, Any]] = []
     per_case: dict[str, Any] = {}
 
     for case_name in case_names:
@@ -225,7 +245,12 @@ def compare_with_baseline(
                 "case": case_name,
             }
             warnings.append(warning)
-            per_case[case_name] = {"case": case_name, "status": "missing_in_latest", "field_diffs": []}
+            per_case[case_name] = {
+                "case": case_name,
+                "status": "missing_in_latest",
+                "field_diffs": [],
+                "allowed_field_diffs": [],
+            }
             continue
 
         if baseline_case is None:
@@ -234,32 +259,57 @@ def compare_with_baseline(
                 "case": case_name,
             }
             warnings.append(warning)
-            per_case[case_name] = {"case": case_name, "status": "missing_in_baseline", "field_diffs": []}
+            per_case[case_name] = {
+                "case": case_name,
+                "status": "missing_in_baseline",
+                "field_diffs": [],
+                "allowed_field_diffs": [],
+            }
             continue
 
         field_diffs: list[dict[str, Any]] = []
+        allowed_field_diffs: list[dict[str, Any]] = []
         for field_name in COMPARE_FIELDS:
             latest_value = latest_case.get(field_name)
             baseline_value = baseline_case.get(field_name)
-            if not _json_equivalent(latest_value, baseline_value):
-                diff_item = {
-                    "field": field_name,
-                    "latest": latest_value,
-                    "baseline": baseline_value,
+            if _json_equivalent(latest_value, baseline_value):
+                continue
+
+            diff_item = {
+                "field": field_name,
+                "latest": latest_value,
+                "baseline": baseline_value,
+            }
+            if (case_name, field_name) in allow_field_changes:
+                allowed_item = {
+                    "type": "allowed_field_changed",
+                    "case": case_name,
+                    **diff_item,
                 }
-                field_diffs.append(diff_item)
-                warnings.append(
-                    {
-                        "type": "field_changed",
-                        "case": case_name,
-                        **diff_item,
-                    }
-                )
+                allowed_field_diffs.append(diff_item)
+                allowed_changes.append(allowed_item)
+                continue
+
+            field_diffs.append(diff_item)
+            warnings.append(
+                {
+                    "type": "field_changed",
+                    "case": case_name,
+                    **diff_item,
+                }
+            )
+
+        status = "same"
+        if field_diffs:
+            status = "changed"
+        elif allowed_field_diffs:
+            status = "changed_allowed"
 
         per_case[case_name] = {
             "case": case_name,
-            "status": "changed" if field_diffs else "same",
+            "status": status,
             "field_diffs": field_diffs,
+            "allowed_field_diffs": allowed_field_diffs,
         }
 
     warning_count = len(warnings)
@@ -269,20 +319,27 @@ def compare_with_baseline(
     diff_report = {
         "meta": {
             "suite": "scenario_matrix_diff",
-            "version": "week5-day6-v1",
+            "version": "week5-day7-v1",
             "run_timestamp": datetime.now(timezone.utc).isoformat(),
             "run_epoch": int(datetime.now(timezone.utc).timestamp()),
             "git_commit": get_git_commit_hash(),
         },
         "compare_fields": COMPARE_FIELDS,
+        "allow_field_changes": [
+            {"case": case_name, "field": field_name}
+            for case_name, field_name in sorted(allow_field_changes)
+        ],
         "summary": {
             "latest_case_count": len(latest_cases),
             "baseline_case_count": len(baseline_cases),
             "compared_case_count": len(case_names),
             "changed_case_count": sum(1 for item in per_case.values() if item["status"] == "changed"),
+            "changed_allowed_case_count": sum(1 for item in per_case.values() if item["status"] == "changed_allowed"),
             "warning_count": warning_count,
+            "allowed_change_count": len(allowed_changes),
         },
         "warnings": warnings,
+        "allowed_changes": allowed_changes,
         "cases": per_case,
         "gate": {
             "warn_threshold": warn_threshold,
@@ -293,6 +350,60 @@ def compare_with_baseline(
         },
     }
     return diff_report
+
+
+def _build_human_summary(diff_report: dict[str, Any]) -> str:
+    lines = ["--- SCENARIO_MATRIX_DIFF_SUMMARY ---"]
+    summary = diff_report.get("summary", {})
+    gate = diff_report.get("gate", {})
+    warnings = diff_report.get("warnings", [])
+    allowed_changes = diff_report.get("allowed_changes", [])
+
+    lines.append(
+        "cases(latest/baseline/compared): "
+        f"{summary.get('latest_case_count', 0)}/"
+        f"{summary.get('baseline_case_count', 0)}/"
+        f"{summary.get('compared_case_count', 0)}"
+    )
+    lines.append(
+        "changed: "
+        f"{summary.get('changed_case_count', 0)} "
+        f"(allowed={summary.get('changed_allowed_case_count', 0)}, "
+        f"allowed_changes={summary.get('allowed_change_count', 0)})"
+    )
+
+    if warnings:
+        lines.append(f"warnings ({len(warnings)}):")
+        for item in warnings:
+            if item.get("type") in {"case_missing_in_latest", "case_missing_in_baseline"}:
+                lines.append(f"  - {item.get('type')}: case={item.get('case')}")
+                continue
+            lines.append(
+                "  - field_changed: "
+                f"case={item.get('case')} field={item.get('field')} "
+                f"baseline={json.dumps(item.get('baseline'), ensure_ascii=False)} "
+                f"latest={json.dumps(item.get('latest'), ensure_ascii=False)}"
+            )
+    else:
+        lines.append("warnings: none")
+
+    if allowed_changes:
+        lines.append(f"allowed_changes ({len(allowed_changes)}):")
+        for item in allowed_changes:
+            lines.append(
+                "  - field_changed_allowed: "
+                f"case={item.get('case')} field={item.get('field')}"
+            )
+
+    lines.append(
+        "gate: "
+        f"warn_threshold={gate.get('warn_threshold')} "
+        f"warn_triggered={gate.get('warn_triggered')} "
+        f"fail_on_warn={gate.get('fail_on_warn')} "
+        f"should_fail={gate.get('should_fail')} "
+        f"exit_code={gate.get('exit_code')}"
+    )
+    return "\n".join(lines)
 
 
 def write_report(report: dict[str, Any], output_path: Path) -> None:
@@ -335,6 +446,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Return non-zero exit code when warning_count is greater than threshold",
     )
+    parser.add_argument(
+        "--allow-field-change",
+        action="append",
+        default=[],
+        help="Allow a known field change without gate warning, format: case:field (repeatable)",
+    )
     return parser.parse_args()
 
 
@@ -342,6 +459,12 @@ def main() -> int:
     args = parse_args()
     if args.warn_threshold is not None and args.warn_threshold < 0:
         print("[error] --warn-threshold must be >= 0", file=sys.stderr)
+        return 1
+
+    try:
+        allow_field_changes = _parse_allow_field_change(args.allow_field_change)
+    except ValueError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
         return 1
 
     report = run_scenario_matrix()
@@ -364,6 +487,7 @@ def main() -> int:
         baseline_report=baseline_report,
         warn_threshold=args.warn_threshold,
         fail_on_warn=args.fail_on_warn,
+        allow_field_changes=allow_field_changes,
     )
     write_report(diff_report, args.diff_json)
 
@@ -371,6 +495,8 @@ def main() -> int:
     print(json.dumps(diff_report, ensure_ascii=False, indent=2))
     print(f"\n[artifact] baseline: {args.baseline_json}")
     print(f"[artifact] diff: {args.diff_json}")
+    print()
+    print(_build_human_summary(diff_report))
 
     return int(diff_report.get("gate", {}).get("exit_code", 0))
 

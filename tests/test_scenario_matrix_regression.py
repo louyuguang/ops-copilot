@@ -84,6 +84,52 @@ class ScenarioMatrixRegressionTest(unittest.TestCase):
         self.assertTrue(diff_report["gate"]["should_fail"])
         self.assertEqual(2, diff_report["gate"]["exit_code"])
 
+    def test_compare_with_baseline_supports_allow_field_change(self) -> None:
+        baseline = {
+            "cases": {
+                "llm_key_missing": {
+                    "run_status": "ok",
+                    "had_fallback": False,
+                    "fallback_count": 0,
+                    "had_retry": False,
+                    "total_retry_count": 0,
+                    "primary_path": "llm",
+                    "effective_path": "rule",
+                    "path_decision": {"action": "fallback", "focus": "generator"},
+                    "error_type": "llm_key_missing",
+                }
+            }
+        }
+        latest = {
+            "cases": {
+                "llm_key_missing": {
+                    "run_status": "ok",
+                    "had_fallback": True,
+                    "fallback_count": 0,
+                    "had_retry": False,
+                    "total_retry_count": 0,
+                    "primary_path": "llm",
+                    "effective_path": "rule",
+                    "path_decision": {"action": "fallback", "focus": "generator"},
+                    "error_type": "llm_key_missing",
+                }
+            }
+        }
+
+        diff_report = compare_with_baseline(
+            latest_report=latest,
+            baseline_report=baseline,
+            warn_threshold=0,
+            fail_on_warn=True,
+            allow_field_changes={("llm_key_missing", "had_fallback")},
+        )
+
+        self.assertEqual(0, diff_report["summary"]["warning_count"])
+        self.assertEqual(1, diff_report["summary"]["allowed_change_count"])
+        self.assertEqual("changed_allowed", diff_report["cases"]["llm_key_missing"]["status"])
+        self.assertFalse(diff_report["gate"]["warn_triggered"])
+        self.assertEqual(0, diff_report["gate"]["exit_code"])
+
     def test_script_writes_json_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "matrix.json"
@@ -142,6 +188,7 @@ class ScenarioMatrixRegressionTest(unittest.TestCase):
             )
             self.assertEqual(2, proc.returncode)
             self.assertTrue(diff.exists())
+            self.assertIn("SCENARIO_MATRIX_DIFF_SUMMARY", proc.stdout)
             diff_data = json.loads(diff.read_text(encoding="utf-8"))
             self.assertGreaterEqual(diff_data.get("summary", {}).get("warning_count", 0), 1)
             self.assertTrue(diff_data.get("gate", {}).get("should_fail"))
