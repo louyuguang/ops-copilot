@@ -37,11 +37,24 @@ class LocalCardRetriever:
                 "matched_cards": [],
                 "returned_count": 0,
                 "fallback": False,
+                "fallback_from": None,
+                "fallback_to": None,
                 "fallback_reason": None,
+                "fallback_after_retry": False,
                 "retrieval_status": "empty",
                 "error_type": "retrieval_empty",
                 "card_found": False,
                 "card_path": str(card_path),
+                "retry_count": 0,
+                "retried": False,
+                "max_retries": 0,
+                "path_decision": {
+                    "action": "continue",
+                    "from": "local",
+                    "to": "continue",
+                    "reason": "retrieval_empty",
+                    "after_retry": False,
+                },
             }
             return "", []
 
@@ -57,11 +70,24 @@ class LocalCardRetriever:
             "matched_cards": [f"docs/cards/{event.event_type}.md"],
             "returned_count": 1,
             "fallback": False,
+            "fallback_from": None,
+            "fallback_to": None,
             "fallback_reason": None,
+            "fallback_after_retry": False,
             "retrieval_status": "ok",
             "error_type": None,
             "card_found": True,
             "card_path": str(card_path),
+            "retry_count": 0,
+            "retried": False,
+            "max_retries": 0,
+            "path_decision": {
+                "action": "primary",
+                "from": "local",
+                "to": "local",
+                "reason": None,
+                "after_retry": False,
+            },
         }
         return context, [f"docs/cards/{event.event_type}.md"]
 
@@ -315,6 +341,7 @@ class ChromaCardRetriever:
 
             context = "\n\n---\n\n".join(str(x) for x in documents if str(x).strip())
             returned_count = len(hits)
+            is_empty = returned_count == 0
             self.last_metadata = {
                 "mode": "chroma",
                 "query": query,
@@ -325,14 +352,24 @@ class ChromaCardRetriever:
                 "matched_cards": hits,
                 "returned_count": returned_count,
                 "fallback": False,
+                "fallback_from": None,
+                "fallback_to": None,
                 "fallback_reason": None,
-                "retrieval_status": "empty" if returned_count == 0 else "ok",
-                "error_type": "retrieval_empty" if returned_count == 0 else None,
+                "fallback_after_retry": False,
+                "retrieval_status": "empty" if is_empty else "ok",
+                "error_type": "retrieval_empty" if is_empty else None,
                 "collection": self.settings.collection,
                 "endpoint": f"{self.settings.host}:{self.settings.port}",
                 "retry_count": retry_count,
                 "retried": retry_count > 0,
                 "max_retries": self.max_retries,
+                "path_decision": {
+                    "action": "continue" if is_empty else "primary",
+                    "from": "chroma",
+                    "to": "continue" if is_empty else "chroma",
+                    "reason": "retrieval_empty" if is_empty else None,
+                    "after_retry": False,
+                },
             }
             return context, refs
 
@@ -348,7 +385,10 @@ class ChromaCardRetriever:
             "matched_cards": [],
             "returned_count": 0,
             "fallback": True,
+            "fallback_from": "chroma",
+            "fallback_to": "local" if self.fallback is not None else None,
             "fallback_reason": "chroma_unavailable",
+            "fallback_after_retry": retry_count > 0,
             "error_type": error_type,
             "error_message": str(exc),
             "collection": self.settings.collection,
@@ -356,6 +396,13 @@ class ChromaCardRetriever:
             "retry_count": retry_count,
             "retried": retry_count > 0,
             "max_retries": self.max_retries,
+            "path_decision": {
+                "action": "fallback" if self.fallback is not None else "continue",
+                "from": "chroma",
+                "to": "local" if self.fallback is not None else "continue",
+                "reason": "chroma_unavailable",
+                "after_retry": retry_count > 0,
+            },
         }
         if self.fallback is not None:
             context, refs = self.fallback.fetch(event)

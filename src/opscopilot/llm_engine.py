@@ -162,17 +162,37 @@ class LLMAnalyzer:
             "llm_called": False,
             "llm_used": False,
             "fallback": False,
+            "fallback_from": None,
+            "fallback_to": None,
             "fallback_reason": None,
+            "fallback_after_retry": False,
             "error_type": None,
             "error_message": None,
             "retry_count": 0,
             "retried": False,
             "max_retries": self.max_retries,
+            "path_decision": {
+                "action": "primary",
+                "from": "llm",
+                "to": "llm",
+                "reason": None,
+                "after_retry": False,
+            },
         }
 
         if self.client is None:
             metadata["fallback"] = True
+            metadata["fallback_from"] = "llm"
+            metadata["fallback_to"] = "rule"
             metadata["fallback_reason"] = "llm_api_key_missing"
+            metadata["fallback_after_retry"] = False
+            metadata["path_decision"] = {
+                "action": "fallback",
+                "from": "llm",
+                "to": "rule",
+                "reason": "llm_api_key_missing",
+                "after_retry": False,
+            }
             metadata["error_type"] = "config_error"
             metadata["error_message"] = "OPENAI_API_KEY is missing"
             self.last_metadata = metadata
@@ -196,12 +216,29 @@ class LLMAnalyzer:
                 llm_data = self.client.complete_json(system_prompt, user_prompt)
                 result = self._merge_with_fallback(llm_data, rule_result)
                 metadata["llm_used"] = True
+                metadata["path_decision"] = {
+                    "action": "primary",
+                    "from": "llm",
+                    "to": "llm",
+                    "reason": None,
+                    "after_retry": False,
+                }
                 self.last_metadata = metadata
                 logger.info("LLM analyze success: %s", metadata)
                 return result
             except OutputParseError as exc:
                 metadata["fallback"] = True
+                metadata["fallback_from"] = "llm"
+                metadata["fallback_to"] = "rule"
                 metadata["fallback_reason"] = "llm_output_parse_failed"
+                metadata["fallback_after_retry"] = metadata["retry_count"] > 0
+                metadata["path_decision"] = {
+                    "action": "fallback",
+                    "from": "llm",
+                    "to": "rule",
+                    "reason": "llm_output_parse_failed",
+                    "after_retry": metadata["retry_count"] > 0,
+                }
                 metadata["error_type"] = exc.error_type
                 metadata["error_message"] = str(exc)
                 self.last_metadata = metadata
@@ -213,15 +250,36 @@ class LLMAnalyzer:
                     metadata["retried"] = True
                     continue
                 metadata["fallback"] = True
+                metadata["fallback_from"] = "llm"
+                metadata["fallback_to"] = "rule"
                 metadata["fallback_reason"] = "llm_call_failed"
+                metadata["fallback_after_retry"] = metadata["retry_count"] > 0
+                metadata["path_decision"] = {
+                    "action": "fallback",
+                    "from": "llm",
+                    "to": "rule",
+                    "reason": "llm_call_failed",
+                    "after_retry": metadata["retry_count"] > 0,
+                }
                 metadata["error_type"] = exc.error_type
                 metadata["error_message"] = str(exc)
                 self.last_metadata = metadata
                 logger.warning("LLM call failed, using fallback: %s", metadata)
                 return rule_result
             except Exception as exc:
+                fallback_reason = f"llm_unexpected_error:{exc.__class__.__name__}"
                 metadata["fallback"] = True
-                metadata["fallback_reason"] = f"llm_unexpected_error:{exc.__class__.__name__}"
+                metadata["fallback_from"] = "llm"
+                metadata["fallback_to"] = "rule"
+                metadata["fallback_reason"] = fallback_reason
+                metadata["fallback_after_retry"] = metadata["retry_count"] > 0
+                metadata["path_decision"] = {
+                    "action": "fallback",
+                    "from": "llm",
+                    "to": "rule",
+                    "reason": fallback_reason,
+                    "after_retry": metadata["retry_count"] > 0,
+                }
                 metadata["error_type"] = "llm_unexpected_error"
                 metadata["error_message"] = str(exc)
                 self.last_metadata = metadata

@@ -45,8 +45,11 @@ class CliBehaviorTest(unittest.TestCase):
 
         meta = json.loads(proc.stderr.strip().splitlines()[-1])
         self.assertEqual("degraded_success", meta.get("run_status"))
+        self.assertTrue(meta["pipeline"].get("had_fallback"))
         gen = meta["pipeline"]["generator"]
         self.assertTrue(gen.get("fallback"))
+        self.assertEqual("llm", gen.get("fallback_from"))
+        self.assertEqual("rule", gen.get("fallback_to"))
         self.assertEqual("llm_api_key_missing", gen.get("fallback_reason"))
         self.assertEqual("config_error", gen.get("error_type"))
 
@@ -66,8 +69,11 @@ class CliBehaviorTest(unittest.TestCase):
 
         meta = json.loads(proc.stderr.strip().splitlines()[-1])
         self.assertEqual("degraded_success", meta.get("run_status"))
+        self.assertTrue(meta["pipeline"].get("had_fallback"))
         retr = meta["pipeline"]["retriever"]
         self.assertTrue(retr.get("fallback"))
+        self.assertEqual("chroma", retr.get("fallback_from"))
+        self.assertEqual("local", retr.get("fallback_to"))
         self.assertEqual("chroma_unavailable", retr.get("fallback_reason"))
         self.assertEqual("external_dependency_error", retr.get("error_type"))
 

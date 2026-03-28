@@ -173,6 +173,8 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual([], result.recommended_refs)
         self.assertFalse(pipeline.last_run_metadata["retriever"].get("card_found"))
         self.assertEqual("empty_retrieval_continue", pipeline.last_run_metadata.get("run_status"))
+        self.assertFalse(pipeline.last_run_metadata.get("had_fallback"))
+        self.assertEqual(0, pipeline.last_run_metadata.get("fallback_count"))
 
     def test_llm_fallback_when_client_failed(self) -> None:
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
@@ -188,8 +190,31 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("high_cpu", result.summary)
         metadata = pipeline.last_run_metadata["generator"]
         self.assertTrue(metadata.get("fallback"))
+        self.assertEqual("llm", metadata.get("fallback_from"))
+        self.assertEqual("rule", metadata.get("fallback_to"))
         self.assertEqual("llm_unexpected_error:RuntimeError", metadata.get("fallback_reason"))
         self.assertEqual("llm_unexpected_error", metadata.get("error_type"))
+        self.assertEqual("degraded_success", pipeline.last_run_metadata.get("run_status"))
+        self.assertTrue(pipeline.last_run_metadata.get("had_fallback"))
+        self.assertEqual(1, pipeline.last_run_metadata.get("fallback_count"))
+
+    def test_llm_missing_key_fallback_semantics(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        cards_dir = BASE_DIR / "docs" / "cards"
+
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(cards_dir),
+            LLMAnalyzer(client=None),
+        )
+        result = pipeline.run(event)
+
+        self.assertIn("high_cpu", result.summary)
+        meta = pipeline.last_run_metadata["generator"]
+        self.assertTrue(meta.get("fallback"))
+        self.assertEqual("llm", meta.get("fallback_from"))
+        self.assertEqual("rule", meta.get("fallback_to"))
+        self.assertEqual("llm_api_key_missing", meta.get("fallback_reason"))
+        self.assertFalse(meta.get("fallback_after_retry"))
         self.assertEqual("degraded_success", pipeline.last_run_metadata.get("run_status"))
 
     def test_llm_fallback_when_output_parse_failed(self) -> None:
@@ -206,9 +231,12 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("high_cpu", result.summary)
         metadata = pipeline.last_run_metadata["generator"]
         self.assertTrue(metadata.get("fallback"))
+        self.assertEqual("llm", metadata.get("fallback_from"))
+        self.assertEqual("rule", metadata.get("fallback_to"))
         self.assertEqual("llm_output_parse_failed", metadata.get("fallback_reason"))
         self.assertEqual("output_parse_failed", metadata.get("error_type"))
         self.assertEqual(0, metadata.get("retry_count"))
+        self.assertFalse(metadata.get("fallback_after_retry"))
 
     def test_llm_retry_then_success(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
@@ -227,6 +255,8 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(meta.get("retried"))
         self.assertFalse(meta.get("fallback"))
         self.assertEqual(2, client.calls)
+        self.assertTrue(pipeline.last_run_metadata.get("had_retry"))
+        self.assertEqual(1, pipeline.last_run_metadata.get("total_retry_count"))
 
     def test_llm_non_retryable_error_fallback_without_retry(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
@@ -242,8 +272,11 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("high_cpu", result.summary)
         meta = pipeline.last_run_metadata["generator"]
         self.assertTrue(meta.get("fallback"))
+        self.assertEqual("llm", meta.get("fallback_from"))
+        self.assertEqual("rule", meta.get("fallback_to"))
         self.assertEqual("llm_call_failed", meta.get("fallback_reason"))
         self.assertEqual(0, meta.get("retry_count"))
+        self.assertFalse(meta.get("fallback_after_retry"))
         self.assertEqual(1, client.calls)
 
     def test_chroma_retriever_returns_context(self) -> None:
@@ -277,6 +310,8 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("CPU", context)
         self.assertIn("docs/cards/high_cpu.md", refs)
         self.assertTrue(retriever.last_metadata.get("fallback"))
+        self.assertEqual("chroma", retriever.last_metadata.get("fallback_from"))
+        self.assertEqual("local", retriever.last_metadata.get("fallback_to"))
         self.assertEqual("local", retriever.last_metadata.get("fallback_target"))
         self.assertTrue(retriever.last_metadata.get("local", {}).get("mode") == "local")
         self.assertGreater(retriever.last_metadata.get("retrieved_context_len", 0), 0)
@@ -293,6 +328,24 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(1, retriever.last_metadata.get("retry_count"))
         self.assertTrue(retriever.last_metadata.get("retried"))
         self.assertFalse(retriever.last_metadata.get("fallback"))
+
+    def test_pipeline_aggregated_fields_and_effective_path(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        client = NonRetryableLLMClient()
+
+        pipeline = IncidentAnalysisPipeline(
+            ChromaCardRetriever(api=FlakyChromaAPI(), top_k=1, max_retries=1),
+            LLMAnalyzer(client=client, max_retries=0),
+        )
+        _ = pipeline.run(event)
+
+        run_meta = pipeline.last_run_metadata
+        self.assertTrue(run_meta.get("had_fallback"))
+        self.assertEqual(1, run_meta.get("fallback_count"))
+        self.assertTrue(run_meta.get("had_retry"))
+        self.assertEqual(1, run_meta.get("total_retry_count"))
+        self.assertEqual("retriever:chroma -> generator:llm", run_meta.get("primary_path"))
+        self.assertEqual("retriever:chroma -> generator:rule", run_meta.get("effective_path"))
 
     def test_local_retriever_metadata_contains_required_fields(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_memory.json")

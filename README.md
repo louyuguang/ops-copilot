@@ -109,10 +109,29 @@ Week5 Day3 timeout/retry 语义（metadata 级，非黑盒）：
   - 非临时型 `llm_call_failed`（如请求参数错误）
 - 重试后仍失败：保持原有错误分类；若进入 fallback，metadata 会同时体现 `retry_count>0` 与 fallback 字段。
 
+Week5 Day4 fallback 语义收口（metadata 级）：
+- retriever / generator 统一补充：
+  - `fallback`、`fallback_from`、`fallback_to`、`fallback_reason`、`fallback_after_retry`
+  - `path_decision`（统一结构）：`action(primary|fallback|continue)` + `from/to/reason/after_retry`
+- `retrieval_empty` 场景不再混入 fallback，统一表达为 `path_decision.action=continue`。
+- pipeline 增加聚合态：
+  - `had_fallback`、`fallback_count`
+  - `had_retry`、`total_retry_count`
+  - `primary_path`（计划路径）与 `effective_path`（实际生效路径）
+
 主流程运行态（`pipeline.run_status`）：
 - `success`：成功且无降级
 - `degraded_success`：发生 fallback，但主流程可继续
-- `empty_retrieval_continue`：检索为空，但仍给出可继续的分析结果
+- `empty_retrieval_continue`：检索为空，走 continue 路径并继续输出分析
+
+典型场景：
+- **`ANALYSIS_MODE=llm` 且缺 `OPENAI_API_KEY`**
+  - `run_status=degraded_success`
+  - generator metadata：`fallback=true`、`fallback_from=llm`、`fallback_to=rule`、`fallback_reason=llm_api_key_missing`
+  - pipeline metadata：`had_fallback=true`，`effective_path` 显示 `generator:rule`
+- **`RETRIEVER_MODE=chroma` 且 Chroma 不可达**
+  - retriever metadata：`fallback=true`、`fallback_from=chroma`、`fallback_to=local`、`fallback_reason=chroma_unavailable`
+  - 若重试后才回退，`fallback_after_retry=true` 且 `retry_count>0`
 
 ## 本地运行
 

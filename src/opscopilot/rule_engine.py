@@ -93,7 +93,19 @@ class RuleBasedAnalyzer:
             "llm_called": False,
             "llm_used": False,
             "fallback": False,
-            "fallback_reason": "rule_mode",
+            "fallback_reason": None,
+            "fallback_from": None,
+            "fallback_to": None,
+            "fallback_after_retry": False,
+            "retry_count": 0,
+            "retried": False,
+            "path_decision": {
+                "action": "primary",
+                "from": "rule",
+                "to": "rule",
+                "reason": None,
+                "after_retry": False,
+            },
         }
 
         return AnalysisResult(
