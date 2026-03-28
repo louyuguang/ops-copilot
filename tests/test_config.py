@@ -45,6 +45,10 @@ class ConfigResolutionTest(unittest.TestCase):
         self.assertEqual("llm", cfg.analysis_mode)
         self.assertEqual("chroma", cfg.retriever_mode)
         self.assertEqual(5, cfg.chroma_top_k)
+        self.assertEqual(20, cfg.llm_timeout_seconds)
+        self.assertEqual(5, cfg.chroma_timeout_seconds)
+        self.assertEqual(1, cfg.llm_max_retries)
+        self.assertEqual(1, cfg.chroma_max_retries)
 
     def test_invalid_chroma_top_k_raises_config_error(self) -> None:
         with self.assertRaises(ConfigError):
@@ -53,6 +57,32 @@ class ConfigResolutionTest(unittest.TestCase):
                 cli_retriever_mode=None,
                 cli_chroma_top_k=None,
                 env={"CHROMA_TOP_K": "abc"},
+            )
+
+    def test_timeout_and_retry_env_values_are_resolved(self) -> None:
+        cfg = resolve_runtime_config(
+            cli_analysis_mode=None,
+            cli_retriever_mode=None,
+            cli_chroma_top_k=None,
+            env={
+                "LLM_TIMEOUT_SECONDS": "12",
+                "CHROMA_TIMEOUT_SECONDS": "7",
+                "LLM_MAX_RETRIES": "2",
+                "CHROMA_MAX_RETRIES": "0",
+            },
+        )
+        self.assertEqual(12, cfg.llm_timeout_seconds)
+        self.assertEqual(7, cfg.chroma_timeout_seconds)
+        self.assertEqual(2, cfg.llm_max_retries)
+        self.assertEqual(0, cfg.chroma_max_retries)
+
+    def test_invalid_retry_raises_config_error(self) -> None:
+        with self.assertRaises(ConfigError):
+            resolve_runtime_config(
+                cli_analysis_mode=None,
+                cli_retriever_mode=None,
+                cli_chroma_top_k=None,
+                env={"LLM_MAX_RETRIES": "-1"},
             )
 
     def test_llm_mode_without_api_key_emits_fallback_warning(self) -> None:

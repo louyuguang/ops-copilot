@@ -60,13 +60,14 @@ def build_generator(mode: str, *, runtime_config) -> RuleBasedAnalyzer | LLMAnal
     return RuleBasedAnalyzer()
 
 
-def build_retriever(mode: str, chroma_top_k: int):
+def build_retriever(mode: str, chroma_top_k: int, *, runtime_config):
     local = LocalCardRetriever(CARDS_DIR)
     if mode == "chroma":
         return ChromaCardRetriever(
-            settings=ChromaSettings.from_env(),
+            settings=ChromaSettings.from_runtime_config(runtime_config),
             top_k=chroma_top_k,
             fallback=local,
+            max_retries=runtime_config.chroma_max_retries,
         )
     return local
 
@@ -97,7 +98,11 @@ def main() -> int:
     try:
         event = load_event(args.event)
         pipeline = IncidentAnalysisPipeline(
-            retriever=build_retriever(runtime_config.retriever_mode, runtime_config.chroma_top_k),
+            retriever=build_retriever(
+                runtime_config.retriever_mode,
+                runtime_config.chroma_top_k,
+                runtime_config=runtime_config,
+            ),
             generator=build_generator(runtime_config.analysis_mode, runtime_config=runtime_config),
         )
         result = pipeline.run(event)
@@ -119,6 +124,10 @@ def main() -> int:
             "retriever": runtime_config.retriever_mode,
             "chroma_top_k": runtime_config.chroma_top_k,
             "llm_requested": runtime_config.analysis_mode == "llm",
+            "llm_timeout_seconds": runtime_config.llm_timeout_seconds,
+            "chroma_timeout_seconds": runtime_config.chroma_timeout_seconds,
+            "llm_max_retries": runtime_config.llm_max_retries,
+            "chroma_max_retries": runtime_config.chroma_max_retries,
             "pipeline": pipeline.last_run_metadata,
             "run_status": pipeline.last_run_metadata.get("run_status", "unknown"),
             "config_warnings": list(runtime_config.warnings),

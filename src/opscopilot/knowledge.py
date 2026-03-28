@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
-from .config import ConfigError, resolve_positive_int
+from .config import ConfigError, RuntimeConfig, resolve_positive_int
 from .errors import ExternalDependencyError
 from .models import IncidentEvent
 
@@ -117,6 +117,7 @@ class ChromaSettings:
     database: str = "default_database"
     collection: str = "opscopilot_cards_v1"
     timeout_seconds: int = 5
+    max_retries: int = 1
 
     @classmethod
     def from_env(cls) -> "ChromaSettings":
@@ -132,6 +133,24 @@ class ChromaSettings:
                 f"Invalid CHROMA_PORT={port_raw!r}. It must be > 0, e.g. 18000."
             )
 
+        timeout_seconds = resolve_positive_int(
+            cli_value=None,
+            env=os.environ,
+            env_name="CHROMA_TIMEOUT_SECONDS",
+            default=5,
+        )
+        max_retries_raw = os.getenv("CHROMA_MAX_RETRIES", "1").strip() or "1"
+        try:
+            max_retries = int(max_retries_raw)
+        except ValueError as exc:
+            raise ConfigError(
+                f"Invalid CHROMA_MAX_RETRIES={max_retries_raw!r}. It must be >= 0, e.g. 1."
+            ) from exc
+        if max_retries < 0:
+            raise ConfigError(
+                f"Invalid CHROMA_MAX_RETRIES={max_retries_raw!r}. It must be >= 0, e.g. 1."
+            )
+
         return cls(
             host=os.getenv("CHROMA_HOST", "localhost").strip() or "localhost",
             port=port,
@@ -141,6 +160,21 @@ class ChromaSettings:
             ),
             collection=os.getenv("CHROMA_COLLECTION", "opscopilot_cards_v1").strip()
             or "opscopilot_cards_v1",
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
+
+    @classmethod
+    def from_runtime_config(cls, config: RuntimeConfig) -> "ChromaSettings":
+        base = cls.from_env()
+        return cls(
+            host=base.host,
+            port=base.port,
+            tenant=base.tenant,
+            database=base.database,
+            collection=base.collection,
+            timeout_seconds=config.chroma_timeout_seconds,
+            max_retries=config.chroma_max_retries,
         )
 
 
@@ -221,6 +255,7 @@ class ChromaCardRetriever:
         fallback: LocalCardRetriever | None = None,
         api: ChromaHttpAPI | None = None,
         embedder: SimpleHashEmbedder | None = None,
+        max_retries: int | None = None,
     ) -> None:
         self.settings = settings or ChromaSettings.from_env()
         self.top_k = top_k if top_k is not None else _read_top_k_from_env()
@@ -228,13 +263,35 @@ class ChromaCardRetriever:
         self.api = api or ChromaHttpAPI(self.settings)
         self.embedder = embedder or SimpleHashEmbedder()
         self.last_metadata: dict[str, Any] = {}
+        self.max_retries = (
+            max_retries
+            if max_retries is not None
+            else max(0, int(getattr(self.settings, "max_retries", 1)))
+        )
 
     def fetch(self, event: IncidentEvent) -> tuple[str, list[str]]:
         query = build_incident_query(event)
         query_summary = summarize_query(query)
-        try:
-            emb = self.embedder.embed(query)
-            raw = self.api.query(emb, self.top_k)
+        emb = self.embedder.embed(query)
+
+        retry_count = 0
+        last_exc: Exception | None = None
+        raw: dict[str, Any] | None = None
+        while retry_count <= self.max_retries:
+            try:
+                raw = self.api.query(emb, self.top_k)
+                break
+            except ExternalDependencyError as exc:
+                last_exc = exc
+                if retry_count >= self.max_retries:
+                    break
+                retry_count += 1
+                continue
+            except Exception as exc:
+                last_exc = exc
+                break
+
+        if raw is not None:
             documents = (raw.get("documents") or [[]])[0] or []
             metadatas = (raw.get("metadatas") or [[]])[0] or []
             ids = (raw.get("ids") or [[]])[0] or []
@@ -273,37 +330,40 @@ class ChromaCardRetriever:
                 "error_type": "retrieval_empty" if returned_count == 0 else None,
                 "collection": self.settings.collection,
                 "endpoint": f"{self.settings.host}:{self.settings.port}",
+                "retry_count": retry_count,
+                "retried": retry_count > 0,
+                "max_retries": self.max_retries,
             }
             return context, refs
-        except Exception as exc:
-            error_type = (
-                exc.error_type
-                if hasattr(exc, "error_type")
-                else "external_dependency_error"
-            )
-            self.last_metadata = {
-                "mode": "chroma",
-                "query": query,
-                "query_summary": query_summary,
-                "query_len": len(query),
-                "top_k": self.top_k,
-                "retrieved_context_len": 0,
-                "matched_cards": [],
-                "returned_count": 0,
-                "fallback": True,
-                "fallback_reason": "chroma_unavailable",
-                "error_type": error_type,
-                "error_message": str(exc),
-                "collection": self.settings.collection,
-                "endpoint": f"{self.settings.host}:{self.settings.port}",
-            }
-            if self.fallback is not None:
-                context, refs = self.fallback.fetch(event)
-                self.last_metadata["fallback_target"] = "local"
-                self.last_metadata["retrieved_context_len"] = len(context)
-                self.last_metadata["local"] = getattr(self.fallback, "last_metadata", {})
-                return context, refs
-            return "", []
+
+        exc = last_exc or RuntimeError("chroma_query_unknown_error")
+        error_type = exc.error_type if hasattr(exc, "error_type") else "external_dependency_error"
+        self.last_metadata = {
+            "mode": "chroma",
+            "query": query,
+            "query_summary": query_summary,
+            "query_len": len(query),
+            "top_k": self.top_k,
+            "retrieved_context_len": 0,
+            "matched_cards": [],
+            "returned_count": 0,
+            "fallback": True,
+            "fallback_reason": "chroma_unavailable",
+            "error_type": error_type,
+            "error_message": str(exc),
+            "collection": self.settings.collection,
+            "endpoint": f"{self.settings.host}:{self.settings.port}",
+            "retry_count": retry_count,
+            "retried": retry_count > 0,
+            "max_retries": self.max_retries,
+        }
+        if self.fallback is not None:
+            context, refs = self.fallback.fetch(event)
+            self.last_metadata["fallback_target"] = "local"
+            self.last_metadata["retrieved_context_len"] = len(context)
+            self.last_metadata["local"] = getattr(self.fallback, "last_metadata", {})
+            return context, refs
+        return "", []
 
 
 def _read_top_k_from_env(default: int = 3) -> int:

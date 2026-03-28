@@ -43,6 +43,60 @@ class ParseFailingClient:
         raise OutputParseError("bad_json")
 
 
+class RetryThenSuccessClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        _ = (system_prompt, user_prompt)
+        self.calls += 1
+        if self.calls == 1:
+            from opscopilot.errors import LLMCallError
+
+            raise LLMCallError("timeout while connecting upstream")
+        return {
+            "summary": "retry success",
+            "possible_causes": ["transient"],
+            "suggested_checks": ["recheck"],
+            "recommended_refs": ["docs/cards/custom.md"],
+            "confidence": "medium",
+        }
+
+
+class NonRetryableLLMClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        _ = (system_prompt, user_prompt)
+        self.calls += 1
+        from opscopilot.errors import LLMCallError
+
+        raise LLMCallError("invalid request payload")
+
+
+class FlakyChromaAPI:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def query(self, query_embedding: list[float], n_results: int) -> dict:
+        _ = (query_embedding, n_results)
+        self.calls += 1
+        if self.calls == 1:
+            from opscopilot.errors import ExternalDependencyError
+
+            raise ExternalDependencyError("chroma_request_failed:timeout")
+        docs = ["# high_cpu\n\nretry success"]
+        meta = [{"path": "docs/cards/high_cpu.md", "event_type": "high_cpu"}]
+        ids = ["high_cpu"]
+        return {
+            "ids": [ids],
+            "documents": [docs],
+            "metadatas": [meta],
+            "distances": [[0.1]],
+        }
+
+
 class FakeChromaAPI:
     def query(self, query_embedding: list[float], n_results: int) -> dict:
         _ = query_embedding
@@ -145,7 +199,7 @@ class PipelineTest(unittest.TestCase):
         event = load_event(event_path)
         pipeline = IncidentAnalysisPipeline(
             LocalCardRetriever(cards_dir),
-            LLMAnalyzer(client=ParseFailingClient()),
+            LLMAnalyzer(client=ParseFailingClient(), max_retries=2),
         )
         result = pipeline.run(event)
 
@@ -154,6 +208,43 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(metadata.get("fallback"))
         self.assertEqual("llm_output_parse_failed", metadata.get("fallback_reason"))
         self.assertEqual("output_parse_failed", metadata.get("error_type"))
+        self.assertEqual(0, metadata.get("retry_count"))
+
+    def test_llm_retry_then_success(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        cards_dir = BASE_DIR / "docs" / "cards"
+        client = RetryThenSuccessClient()
+
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(cards_dir),
+            LLMAnalyzer(client=client, max_retries=1),
+        )
+        result = pipeline.run(event)
+
+        self.assertEqual("retry success", result.summary)
+        meta = pipeline.last_run_metadata["generator"]
+        self.assertEqual(1, meta.get("retry_count"))
+        self.assertTrue(meta.get("retried"))
+        self.assertFalse(meta.get("fallback"))
+        self.assertEqual(2, client.calls)
+
+    def test_llm_non_retryable_error_fallback_without_retry(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        cards_dir = BASE_DIR / "docs" / "cards"
+        client = NonRetryableLLMClient()
+
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(cards_dir),
+            LLMAnalyzer(client=client, max_retries=2),
+        )
+        result = pipeline.run(event)
+
+        self.assertIn("high_cpu", result.summary)
+        meta = pipeline.last_run_metadata["generator"]
+        self.assertTrue(meta.get("fallback"))
+        self.assertEqual("llm_call_failed", meta.get("fallback_reason"))
+        self.assertEqual(0, meta.get("retry_count"))
+        self.assertEqual(1, client.calls)
 
     def test_chroma_retriever_returns_context(self) -> None:
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
@@ -190,6 +281,18 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(retriever.last_metadata.get("local", {}).get("mode") == "local")
         self.assertGreater(retriever.last_metadata.get("retrieved_context_len", 0), 0)
         self.assertGreater(retriever.last_metadata.get("query_len", 0), 0)
+
+    def test_chroma_retry_then_success(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        retriever = ChromaCardRetriever(api=FlakyChromaAPI(), top_k=1, max_retries=1)
+
+        context, refs = retriever.fetch(event)
+
+        self.assertIn("retry success", context)
+        self.assertIn("docs/cards/high_cpu.md", refs)
+        self.assertEqual(1, retriever.last_metadata.get("retry_count"))
+        self.assertTrue(retriever.last_metadata.get("retried"))
+        self.assertFalse(retriever.last_metadata.get("fallback"))
 
     def test_local_retriever_metadata_contains_required_fields(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_memory.json")

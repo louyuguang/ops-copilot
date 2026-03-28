@@ -16,6 +16,10 @@ class RuntimeConfig:
     openai_api_key: str
     openai_model: str
     openai_base_url: str
+    llm_timeout_seconds: int
+    chroma_timeout_seconds: int
+    llm_max_retries: int
+    chroma_max_retries: int
     warnings: tuple[str, ...] = ()
 
 
@@ -62,6 +66,27 @@ def resolve_positive_int(
     return value
 
 
+def resolve_non_negative_int(
+    *,
+    cli_value: int | None,
+    env: Mapping[str, str],
+    env_name: str,
+    default: int,
+) -> int:
+    raw = _pick(cli_value, env, env_name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(
+            f"Invalid {env_name}={raw!r}. It must be a non-negative integer (e.g. {default})."
+        ) from exc
+    if value < 0:
+        raise ConfigError(
+            f"Invalid {env_name}={raw!r}. It must be >= 0 (e.g. {default})."
+        )
+    return value
+
+
 def resolve_runtime_config(
     *,
     cli_analysis_mode: str | None,
@@ -97,6 +122,31 @@ def resolve_runtime_config(
         or "https://api.openai.com/v1"
     )
 
+    llm_timeout_seconds = resolve_positive_int(
+        cli_value=None,
+        env=env,
+        env_name="LLM_TIMEOUT_SECONDS",
+        default=20,
+    )
+    chroma_timeout_seconds = resolve_positive_int(
+        cli_value=None,
+        env=env,
+        env_name="CHROMA_TIMEOUT_SECONDS",
+        default=5,
+    )
+    llm_max_retries = resolve_non_negative_int(
+        cli_value=None,
+        env=env,
+        env_name="LLM_MAX_RETRIES",
+        default=1,
+    )
+    chroma_max_retries = resolve_non_negative_int(
+        cli_value=None,
+        env=env,
+        env_name="CHROMA_MAX_RETRIES",
+        default=1,
+    )
+
     warnings: list[str] = []
     if analysis_mode == "llm" and not openai_api_key:
         warnings.append(
@@ -111,5 +161,9 @@ def resolve_runtime_config(
         openai_api_key=openai_api_key,
         openai_model=openai_model,
         openai_base_url=openai_base_url,
+        llm_timeout_seconds=llm_timeout_seconds,
+        chroma_timeout_seconds=chroma_timeout_seconds,
+        llm_max_retries=llm_max_retries,
+        chroma_max_retries=chroma_max_retries,
         warnings=tuple(warnings),
     )

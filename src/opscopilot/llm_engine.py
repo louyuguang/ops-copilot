@@ -23,6 +23,7 @@ class OpenAISettings:
     model: str = "gpt-5.4"
     base_url: str = "https://api.openai.com/v1"
     timeout_seconds: int = 20
+    max_retries: int = 1
 
     @classmethod
     def from_env(cls) -> "OpenAISettings | None":
@@ -34,7 +35,15 @@ class OpenAISettings:
             os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
             or "https://api.openai.com/v1"
         )
-        return cls(api_key=api_key, model=model, base_url=base_url)
+        timeout_seconds = int(os.getenv("LLM_TIMEOUT_SECONDS", "20").strip() or "20")
+        max_retries = int(os.getenv("LLM_MAX_RETRIES", "1").strip() or "1")
+        return cls(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
 
     @classmethod
     def from_runtime_config(cls, config: RuntimeConfig) -> "OpenAISettings | None":
@@ -44,6 +53,8 @@ class OpenAISettings:
             api_key=config.openai_api_key,
             model=config.openai_model,
             base_url=config.openai_base_url,
+            timeout_seconds=config.llm_timeout_seconds,
+            max_retries=config.llm_max_retries,
         )
 
 
@@ -113,21 +124,34 @@ class LLMAnalyzer:
         client: OpenAIChatClient | None = None,
         fallback_analyzer: RuleBasedAnalyzer | None = None,
         prompt_store: PromptTemplateStore | None = None,
+        max_retries: int | None = None,
     ) -> None:
         self.client = client
         self.fallback_analyzer = fallback_analyzer or RuleBasedAnalyzer()
         self.prompt_store = prompt_store or PromptTemplateStore()
         self.last_metadata: dict[str, Any] = {}
+        if max_retries is not None:
+            self.max_retries = max_retries
+        elif client is not None and hasattr(client, "settings"):
+            self.max_retries = max(0, int(getattr(client.settings, "max_retries", 1)))
+        else:
+            self.max_retries = 1
 
     @classmethod
     def from_env(cls) -> "LLMAnalyzer":
         settings = OpenAISettings.from_env()
-        return cls(client=OpenAIChatClient(settings) if settings else None)
+        return cls(
+            client=OpenAIChatClient(settings) if settings else None,
+            max_retries=settings.max_retries if settings else 1,
+        )
 
     @classmethod
     def from_runtime_config(cls, config: RuntimeConfig) -> "LLMAnalyzer":
         settings = OpenAISettings.from_runtime_config(config)
-        return cls(client=OpenAIChatClient(settings) if settings else None)
+        return cls(
+            client=OpenAIChatClient(settings) if settings else None,
+            max_retries=config.llm_max_retries,
+        )
 
     def generate(self, event: IncidentEvent, context: str) -> AnalysisResult:
         rule_result = self.fallback_analyzer.generate(event, context)
@@ -141,6 +165,9 @@ class LLMAnalyzer:
             "fallback_reason": None,
             "error_type": None,
             "error_message": None,
+            "retry_count": 0,
+            "retried": False,
+            "max_retries": self.max_retries,
         }
 
         if self.client is None:
@@ -163,38 +190,63 @@ class LLMAnalyzer:
         user_prompt = self._build_user_prompt(event, context, rule_result, task)
         metadata["input_layers"] = ["incident", "retrieved_context", "rule_result"]
 
-        try:
-            metadata["llm_called"] = True
-            llm_data = self.client.complete_json(system_prompt, user_prompt)
-            result = self._merge_with_fallback(llm_data, rule_result)
-            metadata["llm_used"] = True
-            self.last_metadata = metadata
-            logger.info("LLM analyze success: %s", metadata)
-            return result
-        except OutputParseError as exc:
-            metadata["fallback"] = True
-            metadata["fallback_reason"] = "llm_output_parse_failed"
-            metadata["error_type"] = exc.error_type
-            metadata["error_message"] = str(exc)
-            self.last_metadata = metadata
-            logger.warning("LLM output parse failed, using fallback: %s", metadata)
-            return rule_result
-        except LLMCallError as exc:
-            metadata["fallback"] = True
-            metadata["fallback_reason"] = "llm_call_failed"
-            metadata["error_type"] = exc.error_type
-            metadata["error_message"] = str(exc)
-            self.last_metadata = metadata
-            logger.warning("LLM call failed, using fallback: %s", metadata)
-            return rule_result
-        except Exception as exc:
-            metadata["fallback"] = True
-            metadata["fallback_reason"] = f"llm_unexpected_error:{exc.__class__.__name__}"
-            metadata["error_type"] = "llm_unexpected_error"
-            metadata["error_message"] = str(exc)
-            self.last_metadata = metadata
-            logger.warning("LLM analyze failed, using fallback: %s", metadata)
-            return rule_result
+        while True:
+            try:
+                metadata["llm_called"] = True
+                llm_data = self.client.complete_json(system_prompt, user_prompt)
+                result = self._merge_with_fallback(llm_data, rule_result)
+                metadata["llm_used"] = True
+                self.last_metadata = metadata
+                logger.info("LLM analyze success: %s", metadata)
+                return result
+            except OutputParseError as exc:
+                metadata["fallback"] = True
+                metadata["fallback_reason"] = "llm_output_parse_failed"
+                metadata["error_type"] = exc.error_type
+                metadata["error_message"] = str(exc)
+                self.last_metadata = metadata
+                logger.warning("LLM output parse failed, using fallback: %s", metadata)
+                return rule_result
+            except LLMCallError as exc:
+                if self._should_retry_llm_error(exc, metadata["retry_count"]):
+                    metadata["retry_count"] += 1
+                    metadata["retried"] = True
+                    continue
+                metadata["fallback"] = True
+                metadata["fallback_reason"] = "llm_call_failed"
+                metadata["error_type"] = exc.error_type
+                metadata["error_message"] = str(exc)
+                self.last_metadata = metadata
+                logger.warning("LLM call failed, using fallback: %s", metadata)
+                return rule_result
+            except Exception as exc:
+                metadata["fallback"] = True
+                metadata["fallback_reason"] = f"llm_unexpected_error:{exc.__class__.__name__}"
+                metadata["error_type"] = "llm_unexpected_error"
+                metadata["error_message"] = str(exc)
+                self.last_metadata = metadata
+                logger.warning("LLM analyze failed, using fallback: %s", metadata)
+                return rule_result
+
+    def _should_retry_llm_error(self, exc: LLMCallError, current_retry_count: int) -> bool:
+        if current_retry_count >= self.max_retries:
+            return False
+        message = str(exc).lower()
+        transient_markers = [
+            "timed out",
+            "timeout",
+            "temporary",
+            "temporarily",
+            "connection reset",
+            "connection refused",
+            "name or service not known",
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+        ]
+        return any(marker in message for marker in transient_markers)
 
     def _build_user_prompt(
         self,
