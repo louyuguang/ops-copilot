@@ -298,6 +298,40 @@ python scripts/compare_retrievers.py \
 - baseline 严格校验：`--strict-baseline`，当 baseline 覆盖存在缺口（`baseline_missing_count > 0` 或 `comparison_missing_in_baseline_count > 0`）时返回非 0（exit code 3）
 - CI 精简摘要：`--summary-json <path>`，输出可直接被 CI / regression 读取的关键字段（自动创建父目录）
 
+## 场景矩阵回归（Week5 Day5 轻量入口）
+
+新增脚本：`scripts/scenario_matrix_regression.py`
+
+用途：把 Day1~Day4 的配置/错误语义/重试与 fallback 聚合语义，固化成固定 case 的轻量回归资产。
+
+运行方式：
+
+```bash
+export PYTHONPATH=src
+python scripts/scenario_matrix_regression.py
+# 或指定落盘位置
+python scripts/scenario_matrix_regression.py --output-json reports/eval/scenario-matrix-latest.json
+```
+
+默认覆盖 case：
+- `llm_key_missing`
+- `llm_call_failed_after_retry`
+- `chroma_down`
+- `retrieval_empty`
+
+输出工件（JSON，默认 `reports/eval/scenario-matrix-latest.json`）核心字段：
+- case 级：`run_status`、`had_fallback`、`fallback_count`、`had_retry`、`total_retry_count`
+- 路径级：`primary_path`、`effective_path`
+- 错误/决策：`error_type`、`path_decision`（并保留 `decisions` 原始聚合）
+- 汇总级：`summary.case_count`、`summary.fallback_cases`、`summary.retry_cases`
+
+与 compare / regression gate 的关系：
+- 该入口聚焦“固定语义场景是否还成立”，输出结构稳定、可直接供 CI 或 compare 脚本读取。
+- 可把本次产物作为 baseline，在后续 Day6 gate 中做字段级对比（例如 fallback/retry 语义是否回归）。
+- 与 `compare_retrievers.py` 互补：
+  - `compare_retrievers.py` 关注 local/chroma 结果差异趋势
+  - `scenario_matrix_regression.py` 关注错误语义 + 决策路径语义是否稳定
+
 ## Docker
 
 构建镜像：
