@@ -4,6 +4,7 @@ from typing import Any
 
 from .interfaces import AnalysisGenerator, KnowledgeRetriever
 from .models import AnalysisResult, IncidentEvent
+from .workflow import IncidentWorkflowRunner
 
 
 def _extract_decision(meta: dict[str, Any]) -> dict[str, Any]:
@@ -37,14 +38,18 @@ class IncidentAnalysisPipeline:
     def __init__(self, retriever: KnowledgeRetriever, generator: AnalysisGenerator) -> None:
         self.retriever = retriever
         self.generator = generator
+        self.workflow = IncidentWorkflowRunner(retriever, generator)
         self.last_run_metadata: dict[str, Any] = {}
 
     def run(self, event: IncidentEvent) -> AnalysisResult:
-        context_text, refs = self.retriever.fetch(event)
-        result = self.generator.generate(event, context_text)
+        workflow_state = self.workflow.run(event)
+        result = workflow_state.final_result
+        if result is None:
+            raise RuntimeError("workflow did not produce final_result")
 
-        retriever_meta = getattr(self.retriever, "last_metadata", {})
-        generator_meta = getattr(self.generator, "last_metadata", {})
+        refs = workflow_state.reference_paths
+        retriever_meta = workflow_state.metadata.get("retriever", {})
+        generator_meta = workflow_state.metadata.get("generator", {})
 
         retriever_decision = _extract_decision(retriever_meta)
         generator_decision = _extract_decision(generator_meta)
@@ -87,6 +92,12 @@ class IncidentAnalysisPipeline:
             "effective_path": effective_path,
             "retriever": retriever_meta,
             "generator": generator_meta,
+            "workflow": workflow_state.metadata.get("workflow", {}),
+            "workflow_trace": workflow_state.step_trace,
+            "structured_checks": {
+                "count": len(workflow_state.structured_checks),
+                "source": workflow_state.metadata.get("checks", {}).get("source", "unknown"),
+            },
             "decisions": {
                 "retriever": retriever_decision,
                 "generator": generator_decision,

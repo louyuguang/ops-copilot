@@ -347,6 +347,28 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual("retriever:chroma -> generator:llm", run_meta.get("primary_path"))
         self.assertEqual("retriever:chroma -> generator:rule", run_meta.get("effective_path"))
 
+    def test_workflow_skeleton_trace_and_path(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(LocalCardRetriever(BASE_DIR / "docs" / "cards"), RuleBasedAnalyzer())
+
+        _ = pipeline.run(event)
+
+        run_meta = pipeline.last_run_metadata
+        workflow_meta = run_meta.get("workflow", {})
+        workflow_trace = run_meta.get("workflow_trace", [])
+
+        self.assertEqual(
+            "incident -> retrieve -> checks -> final_analysis",
+            workflow_meta.get("step_path"),
+        )
+        self.assertEqual(
+            ["incident", "retrieve", "checks", "final_analysis"],
+            workflow_meta.get("steps"),
+        )
+        self.assertEqual(4, len(workflow_trace))
+        self.assertEqual(4, run_meta.get("structured_checks", {}).get("count"))
+        self.assertEqual("rule_baseline", run_meta.get("structured_checks", {}).get("source"))
+
     def test_local_retriever_metadata_contains_required_fields(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_memory.json")
         retriever = LocalCardRetriever(BASE_DIR / "docs" / "cards")

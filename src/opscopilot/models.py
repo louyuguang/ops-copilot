@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -71,3 +71,14 @@ class AnalysisResult:
     suggested_checks: list[str]
     recommended_refs: list[str]
     confidence: str
+
+
+@dataclass
+class WorkflowState:
+    event: IncidentEvent
+    context_text: str = ""
+    reference_paths: list[str] = field(default_factory=list)
+    structured_checks: list[str] = field(default_factory=list)
+    final_result: AnalysisResult | None = None
+    step_trace: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)

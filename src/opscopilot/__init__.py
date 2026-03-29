@@ -15,6 +15,7 @@ from .knowledge import (
 from .llm_engine import LLMAnalyzer, OpenAISettings
 from .pipeline import IncidentAnalysisPipeline
 from .rule_engine import RuleBasedAnalyzer
+from .workflow import IncidentWorkflowRunner
 
 __all__ = [
     "load_event",
@@ -27,6 +28,7 @@ __all__ = [
     "RuleBasedAnalyzer",
     "LLMAnalyzer",
     "OpenAISettings",
+    "IncidentWorkflowRunner",
     "OpsCopilotError",
     "ExternalDependencyError",
     "RetrievalEmptyError",
