@@ -867,6 +867,50 @@ class ObservabilityFieldsTest(unittest.TestCase):
         self.assertEqual("final_analysis", degraded_reason.get("step"))
         self.assertEqual("llm_output_parse_failed", degraded_reason.get("reason"))
 
+    def test_observability_metadata_boundaries_and_compat_aliases(self) -> None:
+        _, meta = self._run_pipeline()
+
+        obs = meta.get("observability", {})
+        self.assertEqual("week7_day5", obs.get("schema"))
+        self.assertIn("run", obs)
+        self.assertIn("workflow", obs)
+        self.assertIn("steps", obs)
+        self.assertIn("resources", obs)
+
+        # run-level consistency
+        self.assertEqual(meta.get("request_id"), obs.get("run", {}).get("request_id"))
+        self.assertEqual(meta.get("run_status"), obs.get("run", {}).get("status"))
+        self.assertEqual(meta.get("error_summary"), obs.get("run", {}).get("error_summary"))
+        self.assertEqual(meta.get("degraded_reason"), obs.get("run", {}).get("degraded_reason"))
+
+        # workflow-level consistency
+        self.assertEqual(meta.get("workflow_overview"), obs.get("workflow", {}).get("overview"))
+        self.assertEqual(meta.get("workflow_trace"), obs.get("workflow", {}).get("trace"))
+
+        # step-level consistency + structured_checks compatibility
+        self.assertEqual(meta.get("retrieve"), obs.get("steps", {}).get("retrieve"))
+        self.assertEqual(meta.get("checks"), obs.get("steps", {}).get("checks"))
+        self.assertEqual(meta.get("final_analysis"), obs.get("steps", {}).get("final_analysis"))
+        self.assertEqual(meta.get("checks", {}).get("count"), meta.get("structured_checks", {}).get("count"))
+        self.assertEqual(meta.get("checks", {}).get("source"), meta.get("structured_checks", {}).get("source"))
+        self.assertEqual(meta.get("checks", {}).get("path"), meta.get("structured_checks", {}).get("path"))
+
+    def test_observability_metadata_stays_explainable_in_degraded_run(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            ExplodingGenerator(),
+        )
+
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+        obs = meta.get("observability", {})
+
+        self.assertEqual("degraded_success", obs.get("run", {}).get("status"))
+        self.assertTrue(obs.get("run", {}).get("degraded_reason", {}).get("degraded"))
+        self.assertEqual("fallback", obs.get("run", {}).get("degraded_reason", {}).get("type"))
+        self.assertEqual("fallback", obs.get("steps", {}).get("final_analysis", {}).get("path"))
+
     def test_degraded_reason_for_continue_path_aligns_with_run_status(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
         event.raw["event_type"] = "disk_io_saturation"

@@ -320,6 +320,29 @@ class IncidentAnalysisPipeline:
         )
         degraded_reason = _build_degraded_reason(run_status, workflow_state.step_trace)
 
+        retrieve_summary = {
+            "source": retrieve_meta.get("source", retriever_meta.get("mode", "unknown")),
+            "count": int(retrieve_meta.get("count", retriever_meta.get("returned_count", 0)) or 0),
+            "refs": retrieve_meta.get("refs", refs),
+            "path": retrieve_meta.get("path", retriever_decision.get("action", "primary")),
+            "fallback": bool(retrieve_meta.get("fallback", retriever_meta.get("fallback", False))),
+        }
+        checks_summary = {
+            "items": checks_meta.get("items", []),
+            "count": int(checks_meta.get("count", 0) or 0),
+            "source": checks_meta.get("source", "unknown"),
+            "source_counts": checks_meta.get("source_counts", {}),
+            "path": checks_meta.get("path", "primary"),
+        }
+        final_analysis_summary = {
+            "path": final_meta.get("path", "primary"),
+            "consumed_inputs": final_meta.get("consumed_inputs", {}),
+            "output_sources": final_meta.get("output_sources", {}),
+            "error_type": final_meta.get("error_type"),
+        }
+
+        # Week 7 Day 5: keep backward-compatible top-level fields while adding
+        # clearer run/workflow/steps boundaries under `observability`.
         self.last_run_metadata = {
             "request_id": request_id,
             "event_type": event.event_type,
@@ -341,30 +364,16 @@ class IncidentAnalysisPipeline:
             "workflow": workflow_meta,
             "workflow_overview": workflow_overview,
             "workflow_trace": workflow_state.step_trace,
-            "retrieve": {
-                "source": retrieve_meta.get("source", retriever_meta.get("mode", "unknown")),
-                "count": int(retrieve_meta.get("count", retriever_meta.get("returned_count", 0)) or 0),
-                "refs": retrieve_meta.get("refs", refs),
-                "path": retrieve_meta.get("path", retriever_decision.get("action", "primary")),
-                "fallback": bool(retrieve_meta.get("fallback", retriever_meta.get("fallback", False))),
-            },
+            "retrieve": retrieve_summary,
             "structured_checks": {
-                "count": len(workflow_state.structured_checks),
-                "source": checks_meta.get("source", "unknown"),
-                "source_counts": checks_meta.get("source_counts", {}),
-                "path": checks_meta.get("path", "primary"),
+                "count": checks_summary["count"],
+                "source": checks_summary["source"],
+                "source_counts": checks_summary["source_counts"],
+                "path": checks_summary["path"],
+                "compat_alias_of": "checks",
             },
-            "checks": {
-                "items": checks_meta.get("items", []),
-                "count": int(checks_meta.get("count", 0) or 0),
-                "path": checks_meta.get("path", "primary"),
-            },
-            "final_analysis": {
-                "path": final_meta.get("path", "primary"),
-                "consumed_inputs": final_meta.get("consumed_inputs", {}),
-                "output_sources": final_meta.get("output_sources", {}),
-                "error_type": final_meta.get("error_type"),
-            },
+            "checks": checks_summary,
+            "final_analysis": final_analysis_summary,
             "output_aggregation": {
                 "recommended_refs_from": "retrieve" if refs else "generator",
                 "recommended_refs_count": len(refs or result.recommended_refs),
@@ -380,6 +389,36 @@ class IncidentAnalysisPipeline:
                     "after_retry": False,
                 },
                 "generator": generator_decision,
+            },
+            "observability": {
+                "schema": "week7_day5",
+                "notes": "run/workflow/steps boundaries normalized; top-level fields kept for compatibility",
+                "run": {
+                    "request_id": request_id,
+                    "status": run_status,
+                    "total_duration_ms": total_duration_ms,
+                    "had_fallback": had_fallback,
+                    "fallback_count": fallback_count,
+                    "had_retry": had_retry,
+                    "total_retry_count": total_retry_count,
+                    "primary_path": primary_path,
+                    "effective_path": effective_path,
+                    "degraded_reason": degraded_reason,
+                    "error_summary": error_summary,
+                },
+                "workflow": {
+                    "overview": workflow_overview,
+                    "trace": workflow_state.step_trace,
+                },
+                "steps": {
+                    "retrieve": retrieve_summary,
+                    "checks": checks_summary,
+                    "final_analysis": final_analysis_summary,
+                },
+                "resources": {
+                    "token_usage": token_usage,
+                    "cost_estimate": cost_estimate,
+                },
             },
         }
 
