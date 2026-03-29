@@ -83,6 +83,7 @@ class IncidentAnalysisPipeline:
 
         retrieve_meta = workflow_state.metadata.get("retrieve", {})
         checks_meta = workflow_state.metadata.get("checks", {})
+        final_meta = workflow_state.metadata.get("final_analysis", {})
 
         self.last_run_metadata = {
             "event_type": event.event_type,
@@ -114,6 +115,17 @@ class IncidentAnalysisPipeline:
                 "items": checks_meta.get("items", []),
                 "count": int(checks_meta.get("count", 0) or 0),
                 "path": checks_meta.get("path", "primary"),
+            },
+            "final_analysis": {
+                "path": final_meta.get("path", "primary"),
+                "consumed_inputs": final_meta.get("consumed_inputs", {}),
+                "output_sources": final_meta.get("output_sources", {}),
+                "error_type": final_meta.get("error_type"),
+            },
+            "output_aggregation": {
+                "recommended_refs_from": "retrieve" if refs else "generator",
+                "recommended_refs_count": len(refs or result.recommended_refs),
+                "workflow_checks_count": len(workflow_state.structured_checks),
             },
             "decisions": {
                 "retriever": retriever_decision,

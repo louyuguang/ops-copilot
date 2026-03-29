@@ -166,30 +166,120 @@ class ExtractStructuredChecksStep:
 class BuildFinalAnalysisStep:
     name = "final_analysis"
 
-    def __init__(self, generator: AnalysisGenerator) -> None:
+    def __init__(
+        self,
+        generator: AnalysisGenerator,
+        fallback_analyzer: AnalysisGenerator | None = None,
+    ) -> None:
         self._generator = generator
+        self._fallback_analyzer = fallback_analyzer or RuleBasedAnalyzer()
+
+    def _generator_mode(self) -> str:
+        last_meta = getattr(self._generator, "last_metadata", {})
+        if isinstance(last_meta, dict) and isinstance(last_meta.get("mode"), str):
+            return str(last_meta["mode"])
+        name = self._generator.__class__.__name__.lower()
+        if "llm" in name:
+            return "llm"
+        if "rule" in name:
+            return "rule"
+        return "unknown"
 
     def execute(self, state: WorkflowState) -> WorkflowState:
+        retrieve_meta = state.metadata.get("retrieve", {})
+        checks_meta = state.metadata.get("checks", {})
+
         context_for_final = state.context_text
-        if state.structured_checks:
+        checks_block_injected = bool(state.structured_checks)
+        if checks_block_injected:
             checks_text = "\n".join(f"- {x}" for x in state.structured_checks)
             context_for_final = f"{state.context_text}\n\n[structured_checks]\n{checks_text}"
 
-        result = self._generator.generate(state.event, context_for_final)
-        state.final_result = result
+        consumed_inputs = {
+            "retrieve": {
+                "context_len": int(len(state.context_text)),
+                "refs_count": len(state.reference_paths),
+                "path": retrieve_meta.get("path", "unknown"),
+                "source": retrieve_meta.get("source", "unknown"),
+            },
+            "checks": {
+                "count": len(state.structured_checks),
+                "path": checks_meta.get("path", "unknown"),
+                "source_counts": checks_meta.get("source_counts", {}),
+                "checks_block_injected": checks_block_injected,
+            },
+        }
 
-        generator_meta = getattr(self._generator, "last_metadata", {})
+        status = "ok"
+        final_path = "primary"
+        final_error: str | None = None
+
+        try:
+            result = self._generator.generate(state.event, context_for_final)
+            generator_meta = getattr(self._generator, "last_metadata", {})
+        except Exception as exc:  # pragma: no cover - defensive fallback for custom generators
+            status = "degraded"
+            final_path = "fallback"
+            final_error = str(exc)
+            result = self._fallback_analyzer.generate(state.event, context_for_final)
+            fallback_from = self._generator_mode()
+            generator_meta = {
+                "mode": fallback_from,
+                "llm_configured": None,
+                "llm_called": None,
+                "llm_used": False,
+                "fallback": True,
+                "fallback_from": fallback_from,
+                "fallback_to": "rule",
+                "fallback_reason": f"final_synthesis_failed:{exc.__class__.__name__}",
+                "fallback_after_retry": False,
+                "error_type": "final_synthesis_failed",
+                "error_message": str(exc),
+                "retry_count": 0,
+                "retried": False,
+                "path_decision": {
+                    "action": "fallback",
+                    "from": fallback_from,
+                    "to": "rule",
+                    "reason": f"final_synthesis_failed:{exc.__class__.__name__}",
+                    "after_retry": False,
+                },
+            }
+
+        state.final_result = result
         state.metadata["generator"] = generator_meta
 
-        _append_trace(
-            state,
-            step=self.name,
-            details={
-                "confidence": result.confidence,
-                "possible_causes_count": len(result.possible_causes),
-                "suggested_checks_count": len(result.suggested_checks),
+        final_meta = {
+            "path": final_path,
+            "consumed_inputs": consumed_inputs,
+            "output_sources": {
+                "summary": "generator" if final_path == "primary" else "fallback_rule",
+                "possible_causes": "generator" if final_path == "primary" else "fallback_rule",
+                "suggested_checks": "generator" if final_path == "primary" else "fallback_rule",
+                "recommended_refs": "retrieve" if state.reference_paths else "generator",
+                "workflow_aggregated": {
+                    "structured_checks_in_context": checks_block_injected,
+                    "retrieve_refs_forced_in_pipeline_output": bool(state.reference_paths),
+                },
             },
-        )
+        }
+        if final_error:
+            final_meta["error_type"] = "final_synthesis_failed"
+            final_meta["error_message"] = final_error
+        state.metadata["final_analysis"] = final_meta
+
+        trace_details = {
+            "path": final_path,
+            "confidence": result.confidence,
+            "possible_causes_count": len(result.possible_causes),
+            "suggested_checks_count": len(result.suggested_checks),
+            "consumed_retrieve_refs": consumed_inputs["retrieve"]["refs_count"],
+            "consumed_structured_checks": consumed_inputs["checks"]["count"],
+        }
+        if final_error:
+            trace_details["error"] = final_error
+
+        _append_trace(state, step=self.name, status=status, details=trace_details)
         return state
 
 

@@ -139,6 +139,38 @@ class FailingBaselineAnalyzer:
         raise RuntimeError("checks_step_boom")
 
 
+class ContextCapturingGenerator:
+    def __init__(self) -> None:
+        self.last_context = ""
+        self.last_metadata: dict[str, object] = {
+            "mode": "capture",
+            "fallback": False,
+            "path_decision": {
+                "action": "primary",
+                "from": "capture",
+                "to": "capture",
+                "reason": None,
+                "after_retry": False,
+            },
+            "retry_count": 0,
+            "retried": False,
+        }
+
+    def generate(self, event: IncidentEvent, context: str):  # type: ignore[no-untyped-def]
+        _ = event
+        self.last_context = context
+        return RuleBasedAnalyzer().generate(event, context)
+
+
+class ExplodingGenerator:
+    def __init__(self) -> None:
+        self.last_metadata: dict[str, object] = {}
+
+    def generate(self, event: IncidentEvent, context: str):  # type: ignore[no-untyped-def]
+        _ = (event, context)
+        raise RuntimeError("final synthesis boom")
+
+
 class PipelineTest(unittest.TestCase):
     def test_high_cpu_sample_rule(self) -> None:
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
@@ -400,6 +432,48 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("docs/cards/high_cpu.md", retrieve_meta.get("refs", []))
         self.assertEqual("primary", retrieve_meta.get("path"))
         self.assertFalse(retrieve_meta.get("fallback"))
+
+    def test_final_step_consumes_retrieve_and_checks_structured_inputs(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        generator = ContextCapturingGenerator()
+        pipeline = IncidentAnalysisPipeline(LocalCardRetriever(BASE_DIR / "docs" / "cards"), generator)
+
+        _ = pipeline.run(event)
+
+        self.assertIn("[structured_checks]", generator.last_context)
+        self.assertIn("- 检查近 15 分钟 QPS 与延迟变化", generator.last_context)
+
+        final_meta = pipeline.last_run_metadata.get("final_analysis", {})
+        self.assertEqual("primary", final_meta.get("path"))
+        self.assertEqual(1, final_meta.get("consumed_inputs", {}).get("retrieve", {}).get("refs_count"))
+        self.assertEqual(5, final_meta.get("consumed_inputs", {}).get("checks", {}).get("count"))
+        self.assertTrue(
+            final_meta.get("output_sources", {})
+            .get("workflow_aggregated", {})
+            .get("structured_checks_in_context")
+        )
+
+    def test_final_step_fallback_when_synthesis_failed(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            ExplodingGenerator(),
+        )
+
+        result = pipeline.run(event)
+
+        self.assertIn("high_cpu", result.summary)
+        self.assertEqual("degraded_success", pipeline.last_run_metadata.get("run_status"))
+        self.assertTrue(pipeline.last_run_metadata.get("had_fallback"))
+        self.assertEqual("fallback", pipeline.last_run_metadata.get("final_analysis", {}).get("path"))
+        self.assertEqual(
+            "fallback",
+            pipeline.last_run_metadata.get("workflow_trace", [])[3].get("details", {}).get("path"),
+        )
+        self.assertEqual(
+            "degraded",
+            pipeline.last_run_metadata.get("workflow_trace", [])[3].get("status"),
+        )
 
     def test_workflow_checks_items_are_structured_with_source(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_memory.json")
