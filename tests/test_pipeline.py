@@ -936,5 +936,101 @@ class ObservabilityFieldsTest(unittest.TestCase):
         self.assertEqual("retrieval_empty", degraded_reason.get("reason"))
 
 
+class ObservabilityScenarioSemanticsTest(unittest.TestCase):
+    """Week 7 Day 6: minimal semantic scenario coverage for observability fields."""
+
+    def test_clean_run_observability_semantics(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            LLMAnalyzer(client=FakeClientWithUsage()),
+        )
+
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+        obs = meta.get("observability", {})
+
+        self.assertEqual("success", meta.get("run_status"))
+        self.assertTrue(meta.get("request_id"))
+        self.assertGreaterEqual(meta.get("total_duration_ms", -1), 0)
+
+        self.assertTrue(meta.get("token_usage", {}).get("available"))
+        self.assertTrue(meta.get("cost_estimate", {}).get("available"))
+        self.assertFalse(meta.get("error_summary", {}).get("had_error"))
+        self.assertEqual("clean_run", meta.get("degraded_reason", {}).get("type"))
+
+        self.assertEqual(meta.get("request_id"), obs.get("run", {}).get("request_id"))
+        self.assertEqual(meta.get("total_duration_ms"), obs.get("run", {}).get("total_duration_ms"))
+        self.assertEqual(meta.get("token_usage"), obs.get("resources", {}).get("token_usage"))
+        self.assertEqual(meta.get("cost_estimate"), obs.get("resources", {}).get("cost_estimate"))
+
+    def test_degraded_fallback_observability_semantics(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            LLMAnalyzer(client=ParseFailingClient(), max_retries=1),
+        )
+
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+        obs = meta.get("observability", {})
+
+        self.assertEqual("degraded_success", meta.get("run_status"))
+        self.assertTrue(meta.get("error_summary", {}).get("had_error"))
+        self.assertEqual("output_parse_failed", meta.get("error_summary", {}).get("primary_error_type"))
+        self.assertEqual("fallback", meta.get("degraded_reason", {}).get("type"))
+        self.assertEqual("final_analysis", meta.get("degraded_reason", {}).get("step"))
+
+        self.assertEqual("fallback", meta.get("decisions", {}).get("generator", {}).get("action"))
+        self.assertEqual("fallback", obs.get("steps", {}).get("final_analysis", {}).get("path"))
+        self.assertEqual(meta.get("error_summary"), obs.get("run", {}).get("error_summary"))
+
+    def test_continue_path_observability_semantics(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        event.raw["event_type"] = "disk_io_saturation"
+        event = IncidentEvent.from_dict(event.raw)
+
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            RuleBasedAnalyzer(),
+        )
+
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+
+        self.assertEqual("empty_retrieval_continue", meta.get("run_status"))
+        self.assertEqual("continue", meta.get("decisions", {}).get("retriever", {}).get("action"))
+        self.assertEqual("continue", meta.get("degraded_reason", {}).get("type"))
+        self.assertEqual("retrieval_empty", meta.get("degraded_reason", {}).get("reason"))
+        self.assertFalse(meta.get("error_summary", {}).get("had_error"))
+
+    def test_no_usage_reasons_for_rule_and_llm_not_called(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+
+        rule_pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            RuleBasedAnalyzer(),
+        )
+        _ = rule_pipeline.run(event)
+        rule_meta = rule_pipeline.last_run_metadata
+        self.assertEqual("llm_not_used", rule_meta.get("token_usage", {}).get("reason"))
+        self.assertEqual(
+            "unavailable:llm_not_used",
+            rule_meta.get("cost_estimate", {}).get("estimate_basis"),
+        )
+
+        llm_fallback_pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            LLMAnalyzer(client=None),
+        )
+        _ = llm_fallback_pipeline.run(event)
+        llm_fallback_meta = llm_fallback_pipeline.last_run_metadata
+        self.assertEqual("llm_not_called", llm_fallback_meta.get("token_usage", {}).get("reason"))
+        self.assertEqual(
+            "unavailable:llm_not_called",
+            llm_fallback_meta.get("cost_estimate", {}).get("estimate_basis"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
