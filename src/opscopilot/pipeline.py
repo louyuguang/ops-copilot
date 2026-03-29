@@ -81,6 +81,9 @@ class IncidentAnalysisPipeline:
             f" -> generator:{_effective_mode(generator_meta, generator_decision)}"
         )
 
+        retrieve_meta = workflow_state.metadata.get("retrieve", {})
+        checks_meta = workflow_state.metadata.get("checks", {})
+
         self.last_run_metadata = {
             "event_type": event.event_type,
             "run_status": run_status,
@@ -94,9 +97,23 @@ class IncidentAnalysisPipeline:
             "generator": generator_meta,
             "workflow": workflow_state.metadata.get("workflow", {}),
             "workflow_trace": workflow_state.step_trace,
+            "retrieve": {
+                "source": retrieve_meta.get("source", retriever_meta.get("mode", "unknown")),
+                "count": int(retrieve_meta.get("count", retriever_meta.get("returned_count", 0)) or 0),
+                "refs": retrieve_meta.get("refs", refs),
+                "path": retrieve_meta.get("path", retriever_decision.get("action", "primary")),
+                "fallback": bool(retrieve_meta.get("fallback", retriever_meta.get("fallback", False))),
+            },
             "structured_checks": {
                 "count": len(workflow_state.structured_checks),
-                "source": workflow_state.metadata.get("checks", {}).get("source", "unknown"),
+                "source": checks_meta.get("source", "unknown"),
+                "source_counts": checks_meta.get("source_counts", {}),
+                "path": checks_meta.get("path", "primary"),
+            },
+            "checks": {
+                "items": checks_meta.get("items", []),
+                "count": int(checks_meta.get("count", 0) or 0),
+                "path": checks_meta.get("path", "primary"),
             },
             "decisions": {
                 "retriever": retriever_decision,

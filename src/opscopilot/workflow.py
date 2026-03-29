@@ -24,21 +24,60 @@ class RetrieveKnowledgeCardsStep:
         self._retriever = retriever
 
     def execute(self, state: WorkflowState) -> WorkflowState:
-        context_text, refs = self._retriever.fetch(state.event)
+        status = "ok"
+        step_error: str | None = None
+        try:
+            context_text, refs = self._retriever.fetch(state.event)
+            retriever_meta = getattr(self._retriever, "last_metadata", {})
+        except Exception as exc:  # pragma: no cover - defensive fallback for unknown retrievers
+            context_text, refs = "", []
+            retriever_meta = {
+                "mode": "unknown",
+                "returned_count": 0,
+                "retrieved_context_len": 0,
+                "matched_cards": [],
+                "error_type": "retriever_step_failed",
+                "error_message": str(exc),
+                "fallback": True,
+                "fallback_reason": "retriever_step_failed",
+                "path_decision": {
+                    "action": "continue",
+                    "from": "unknown",
+                    "to": "continue",
+                    "reason": "retriever_step_failed",
+                    "after_retry": False,
+                },
+            }
+            status = "degraded"
+            step_error = str(exc)
+
         state.context_text = context_text
         state.reference_paths = refs
-
-        retriever_meta = getattr(self._retriever, "last_metadata", {})
         state.metadata["retriever"] = retriever_meta
 
-        _append_trace(
-            state,
-            step=self.name,
-            details={
-                "returned_count": retriever_meta.get("returned_count", len(refs)),
-                "retrieved_context_len": retriever_meta.get("retrieved_context_len", len(context_text)),
-            },
-        )
+        retrieve_summary = {
+            "source": retriever_meta.get("mode", "unknown"),
+            "count": int(retriever_meta.get("returned_count", len(refs)) or 0),
+            "refs": list(refs),
+            "matched_cards": list(retriever_meta.get("matched_cards") or []),
+            "context_len": int(retriever_meta.get("retrieved_context_len", len(context_text)) or 0),
+            "path": retriever_meta.get("path_decision", {}).get("action", "primary"),
+            "fallback": bool(retriever_meta.get("fallback", False)),
+            "error_type": retriever_meta.get("error_type"),
+        }
+        state.metadata["retrieve"] = retrieve_summary
+
+        details = {
+            "returned_count": retrieve_summary["count"],
+            "source": retrieve_summary["source"],
+            "path": retrieve_summary["path"],
+            "fallback": retrieve_summary["fallback"],
+            "retrieved_context_len": retrieve_summary["context_len"],
+        }
+        if step_error:
+            details["error"] = step_error
+
+        _append_trace(state, step=self.name, status=status, details=details)
         return state
 
 
@@ -49,21 +88,78 @@ class ExtractStructuredChecksStep:
         self._baseline_analyzer = baseline_analyzer or RuleBasedAnalyzer()
 
     def execute(self, state: WorkflowState) -> WorkflowState:
-        baseline_result = self._baseline_analyzer.generate(state.event, state.context_text)
-        state.structured_checks = list(baseline_result.suggested_checks)
-        state.metadata["checks"] = {
-            "source": "rule_baseline",
-            "count": len(state.structured_checks),
-        }
+        status = "ok"
+        step_error: str | None = None
+        structured_items: list[dict[str, Any]] = []
 
-        _append_trace(
-            state,
-            step=self.name,
-            details={
-                "checks_count": len(state.structured_checks),
-                "source": "rule_baseline",
-            },
-        )
+        try:
+            baseline_result = self._baseline_analyzer.generate(state.event, state.context_text)
+            for idx, check in enumerate(baseline_result.suggested_checks, start=1):
+                structured_items.append(
+                    {
+                        "id": f"rule-{idx}",
+                        "title": str(check),
+                        "category": "baseline",
+                        "source": "rule",
+                        "refs": [],
+                    }
+                )
+        except Exception as exc:  # pragma: no cover - defensive fallback for custom analyzers
+            status = "degraded"
+            step_error = str(exc)
+
+        if state.context_text.strip() and state.reference_paths:
+            structured_items.append(
+                {
+                    "id": "ctx-1",
+                    "title": "结合检索到的知识卡片逐条核对告警描述与已知故障特征",
+                    "category": "context_alignment",
+                    "source": "retrieved_context",
+                    "refs": list(state.reference_paths),
+                }
+            )
+
+        if not structured_items:
+            structured_items = [
+                {
+                    "id": "fallback-1",
+                    "title": "基础排查信息不足，请先核对服务健康度、最近发布与核心监控指标",
+                    "category": "fallback",
+                    "source": "fallback",
+                    "refs": [],
+                }
+            ]
+
+        state.structured_check_items = structured_items
+        state.structured_checks = [str(item.get("title", "")).strip() for item in structured_items if str(item.get("title", "")).strip()]
+
+        source_counts: dict[str, int] = {}
+        for item in structured_items:
+            src = str(item.get("source", "unknown"))
+            source_counts[src] = source_counts.get(src, 0) + 1
+
+        checks_meta = {
+            "source": "structured_mixed",
+            "count": len(structured_items),
+            "source_counts": source_counts,
+            "items": structured_items,
+            "path": "fallback" if source_counts.get("fallback") else "primary",
+        }
+        if step_error:
+            checks_meta["error_type"] = "checks_step_failed"
+            checks_meta["error_message"] = step_error
+
+        state.metadata["checks"] = checks_meta
+
+        details: dict[str, Any] = {
+            "checks_count": len(structured_items),
+            "source_counts": source_counts,
+            "path": checks_meta["path"],
+        }
+        if step_error:
+            details["error"] = step_error
+
+        _append_trace(state, step=self.name, status=status, details=details)
         return state
 
 

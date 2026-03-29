@@ -10,6 +10,7 @@ from opscopilot.llm_engine import LLMAnalyzer
 from opscopilot.pipeline import IncidentAnalysisPipeline
 from opscopilot.models import IncidentEvent
 from opscopilot.rule_engine import RuleBasedAnalyzer
+from opscopilot.workflow import ExtractStructuredChecksStep
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -121,6 +122,21 @@ class FailingChromaAPI:
     def query(self, query_embedding: list[float], n_results: int) -> dict:
         _ = (query_embedding, n_results)
         raise RuntimeError("chroma_down")
+
+
+class RaisingRetriever:
+    def __init__(self) -> None:
+        self.last_metadata: dict[str, object] = {}
+
+    def fetch(self, event: IncidentEvent) -> tuple[str, list[str]]:
+        _ = event
+        raise RuntimeError("retriever_step_boom")
+
+
+class FailingBaselineAnalyzer:
+    def generate(self, event: IncidentEvent, context: str):  # type: ignore[no-untyped-def]
+        _ = (event, context)
+        raise RuntimeError("checks_step_boom")
 
 
 class PipelineTest(unittest.TestCase):
@@ -366,8 +382,53 @@ class PipelineTest(unittest.TestCase):
             workflow_meta.get("steps"),
         )
         self.assertEqual(4, len(workflow_trace))
-        self.assertEqual(4, run_meta.get("structured_checks", {}).get("count"))
-        self.assertEqual("rule_baseline", run_meta.get("structured_checks", {}).get("source"))
+        self.assertEqual(5, run_meta.get("structured_checks", {}).get("count"))
+        self.assertEqual("structured_mixed", run_meta.get("structured_checks", {}).get("source"))
+        self.assertEqual(4, run_meta.get("structured_checks", {}).get("source_counts", {}).get("rule"))
+        self.assertEqual(1, run_meta.get("structured_checks", {}).get("source_counts", {}).get("retrieved_context"))
+        self.assertEqual("primary", run_meta.get("structured_checks", {}).get("path"))
+
+    def test_workflow_retrieve_metadata_is_structured(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(LocalCardRetriever(BASE_DIR / "docs" / "cards"), RuleBasedAnalyzer())
+
+        _ = pipeline.run(event)
+        retrieve_meta = pipeline.last_run_metadata.get("retrieve", {})
+
+        self.assertEqual("local", retrieve_meta.get("source"))
+        self.assertEqual(1, retrieve_meta.get("count"))
+        self.assertIn("docs/cards/high_cpu.md", retrieve_meta.get("refs", []))
+        self.assertEqual("primary", retrieve_meta.get("path"))
+        self.assertFalse(retrieve_meta.get("fallback"))
+
+    def test_workflow_checks_items_are_structured_with_source(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_memory.json")
+        pipeline = IncidentAnalysisPipeline(LocalCardRetriever(BASE_DIR / "docs" / "cards"), RuleBasedAnalyzer())
+
+        _ = pipeline.run(event)
+        checks_meta = pipeline.last_run_metadata.get("checks", {})
+        items = checks_meta.get("items", [])
+
+        self.assertGreaterEqual(len(items), 2)
+        self.assertTrue(all("title" in x and "source" in x and "category" in x for x in items))
+        self.assertIn("rule", {x.get("source") for x in items})
+        self.assertIn("retrieved_context", {x.get("source") for x in items})
+
+    def test_workflow_step_failure_keeps_pipeline_explainable(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(RaisingRetriever(), RuleBasedAnalyzer())
+        pipeline.workflow.steps[1] = ExtractStructuredChecksStep(FailingBaselineAnalyzer())
+
+        result = pipeline.run(event)
+
+        self.assertTrue(result.summary)
+        run_meta = pipeline.last_run_metadata
+        self.assertEqual("continue", run_meta.get("retrieve", {}).get("path"))
+        self.assertTrue(run_meta.get("retrieve", {}).get("fallback"))
+        self.assertEqual("fallback", run_meta.get("structured_checks", {}).get("path"))
+        self.assertEqual(1, run_meta.get("structured_checks", {}).get("source_counts", {}).get("fallback"))
+        self.assertEqual("degraded", run_meta.get("workflow_trace", [])[1].get("status"))
+        self.assertEqual("degraded", run_meta.get("workflow_trace", [])[2].get("status"))
 
     def test_local_retriever_metadata_contains_required_fields(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_memory.json")

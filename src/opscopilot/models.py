@@ -79,6 +79,7 @@ class WorkflowState:
     context_text: str = ""
     reference_paths: list[str] = field(default_factory=list)
     structured_checks: list[str] = field(default_factory=list)
+    structured_check_items: list[dict[str, Any]] = field(default_factory=list)
     final_result: AnalysisResult | None = None
     step_trace: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
