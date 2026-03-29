@@ -171,6 +171,13 @@ class ExplodingGenerator:
         raise RuntimeError("final synthesis boom")
 
 
+def _trace_by_step(run_meta: dict, step: str) -> dict:
+    for entry in run_meta.get("workflow_trace", []):
+        if entry.get("step") == step:
+            return entry
+    raise AssertionError(f"step not found in workflow_trace: {step}")
+
+
 class PipelineTest(unittest.TestCase):
     def test_high_cpu_sample_rule(self) -> None:
         event_path = BASE_DIR / "samples" / "incidents" / "high_cpu.json"
@@ -555,6 +562,81 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(5, retriever.top_k)
         finally:
             os.environ.pop("CHROMA_TOP_K", None)
+
+
+class WorkflowScenarioRegressionTest(unittest.TestCase):
+    def _run_with(self, retriever, generator) -> dict:  # type: ignore[no-untyped-def]
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(retriever, generator)
+        _ = pipeline.run(event)
+        return pipeline.last_run_metadata
+
+    def test_workflow_scenario_primary_all_steps_primary(self) -> None:
+        run_meta = self._run_with(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            RuleBasedAnalyzer(),
+        )
+
+        overview = run_meta.get("workflow_overview", {})
+        self.assertEqual("primary", overview.get("final_path"))
+        self.assertEqual(0, overview.get("degraded_step_count"))
+        self.assertEqual(0, overview.get("fallback_step_count"))
+        self.assertEqual(0, overview.get("continue_step_count"))
+        self.assertEqual(
+            {"incident": "primary", "retrieve": "primary", "checks": "primary", "final_analysis": "primary"},
+            overview.get("step_path_decisions"),
+        )
+
+    def test_workflow_scenario_retrieve_fail_continue_degraded(self) -> None:
+        run_meta = self._run_with(RaisingRetriever(), RuleBasedAnalyzer())
+
+        overview = run_meta.get("workflow_overview", {})
+        self.assertTrue(overview.get("degraded"))
+        self.assertEqual(1, overview.get("degraded_step_count"))
+        self.assertEqual(1, overview.get("continue_step_count"))
+        self.assertEqual("continue", overview.get("step_path_decisions", {}).get("retrieve"))
+
+        retrieve_trace = _trace_by_step(run_meta, "retrieve")
+        self.assertEqual("degraded", retrieve_trace.get("status"))
+        self.assertEqual("continue", retrieve_trace.get("path_decision", {}).get("action"))
+
+    def test_workflow_scenario_checks_fail_fallback_degraded(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        event.raw["event_type"] = "unknown_event_for_day6"
+        event = IncidentEvent.from_dict(event.raw)
+
+        pipeline = IncidentAnalysisPipeline(LocalCardRetriever(BASE_DIR / "docs" / "cards"), RuleBasedAnalyzer())
+        pipeline.workflow.steps[1] = ExtractStructuredChecksStep(FailingBaselineAnalyzer())
+
+        _ = pipeline.run(event)
+        run_meta = pipeline.last_run_metadata
+
+        overview = run_meta.get("workflow_overview", {})
+        self.assertTrue(overview.get("degraded"))
+        self.assertEqual(1, overview.get("degraded_step_count"))
+        self.assertEqual(1, overview.get("fallback_step_count"))
+        self.assertEqual("fallback", overview.get("step_path_decisions", {}).get("checks"))
+
+        checks_trace = _trace_by_step(run_meta, "checks")
+        self.assertEqual("degraded", checks_trace.get("status"))
+        self.assertEqual("fallback", checks_trace.get("path_decision", {}).get("action"))
+
+    def test_workflow_scenario_final_synthesis_fail_fallback_degraded(self) -> None:
+        run_meta = self._run_with(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            ExplodingGenerator(),
+        )
+
+        overview = run_meta.get("workflow_overview", {})
+        self.assertTrue(overview.get("degraded"))
+        self.assertEqual(1, overview.get("degraded_step_count"))
+        self.assertEqual(1, overview.get("fallback_step_count"))
+        self.assertEqual("fallback", overview.get("final_path"))
+        self.assertEqual("fallback", overview.get("step_path_decisions", {}).get("final_analysis"))
+
+        final_trace = _trace_by_step(run_meta, "final_analysis")
+        self.assertEqual("degraded", final_trace.get("status"))
+        self.assertEqual("fallback", final_trace.get("path_decision", {}).get("action"))
 
 
 class RetrieverComparisonTest(unittest.TestCase):
