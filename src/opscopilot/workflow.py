@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .interfaces import AnalysisGenerator, KnowledgeRetriever, WorkflowStep
@@ -33,15 +34,18 @@ def _append_trace(
     details: dict[str, Any] | None = None,
     error_type: str | None = None,
     error_message: str | None = None,
+    duration_ms: float | None = None,
 ) -> None:
     normalized_decision = path_decision or _normalize_path_decision()
-    trace_entry = {
+    trace_entry: dict[str, Any] = {
         "step": step,
         "status": status,
         "path_decision": normalized_decision,
         "degraded": status != "ok" or normalized_decision.get("action") == "fallback",
         "details": details or {},
     }
+    if duration_ms is not None:
+        trace_entry["duration_ms"] = round(duration_ms, 2)
     if error_type:
         trace_entry["error_type"] = error_type
     if error_message:
@@ -56,6 +60,7 @@ class RetrieveKnowledgeCardsStep:
         self._retriever = retriever
 
     def execute(self, state: WorkflowState) -> WorkflowState:
+        t0 = time.monotonic()
         status = "ok"
         step_error: str | None = None
         try:
@@ -117,6 +122,7 @@ class RetrieveKnowledgeCardsStep:
                 to_mode=retrieve_summary["source"],
             )
 
+        elapsed_ms = (time.monotonic() - t0) * 1000
         _append_trace(
             state,
             step=self.name,
@@ -125,6 +131,7 @@ class RetrieveKnowledgeCardsStep:
             details=details,
             error_type=retriever_meta.get("error_type"),
             error_message=step_error,
+            duration_ms=elapsed_ms,
         )
         return state
 
@@ -136,6 +143,7 @@ class ExtractStructuredChecksStep:
         self._baseline_analyzer = baseline_analyzer or RuleBasedAnalyzer()
 
     def execute(self, state: WorkflowState) -> WorkflowState:
+        t0 = time.monotonic()
         status = "ok"
         step_error: str | None = None
         structured_items: list[dict[str, Any]] = []
@@ -217,6 +225,7 @@ class ExtractStructuredChecksStep:
             after_retry=False,
         )
 
+        elapsed_ms = (time.monotonic() - t0) * 1000
         _append_trace(
             state,
             step=self.name,
@@ -225,6 +234,7 @@ class ExtractStructuredChecksStep:
             details=details,
             error_type=checks_meta.get("error_type"),
             error_message=step_error,
+            duration_ms=elapsed_ms,
         )
         return state
 
@@ -252,6 +262,7 @@ class BuildFinalAnalysisStep:
         return "unknown"
 
     def execute(self, state: WorkflowState) -> WorkflowState:
+        t0 = time.monotonic()
         retrieve_meta = state.metadata.get("retrieve", {})
         checks_meta = state.metadata.get("checks", {})
 
@@ -359,6 +370,7 @@ class BuildFinalAnalysisStep:
         if final_error:
             trace_details["error"] = final_error
 
+        elapsed_ms = (time.monotonic() - t0) * 1000
         _append_trace(
             state,
             step=self.name,
@@ -367,6 +379,7 @@ class BuildFinalAnalysisStep:
             details=trace_details,
             error_type=final_meta.get("error_type"),
             error_message=final_error,
+            duration_ms=elapsed_ms,
         )
         return state
 

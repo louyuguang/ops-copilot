@@ -683,5 +683,76 @@ class CompareScriptTest(unittest.TestCase):
         self.assertIn("--- JSON_REPORT ---", stdout)
 
 
+class ObservabilityFieldsTest(unittest.TestCase):
+    """Week 7 Day 2: request_id, total_duration_ms, per-step duration_ms."""
+
+    def _run_pipeline(self) -> tuple:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            RuleBasedAnalyzer(),
+        )
+        result = pipeline.run(event)
+        return result, pipeline.last_run_metadata
+
+    def test_request_id_present_and_stable(self) -> None:
+        _, meta = self._run_pipeline()
+        request_id = meta.get("request_id")
+        self.assertIsNotNone(request_id)
+        self.assertIsInstance(request_id, str)
+        self.assertEqual(len(request_id), 16)
+
+    def test_request_id_unique_across_runs(self) -> None:
+        _, meta1 = self._run_pipeline()
+        _, meta2 = self._run_pipeline()
+        self.assertNotEqual(meta1["request_id"], meta2["request_id"])
+
+    def test_total_duration_ms_present(self) -> None:
+        _, meta = self._run_pipeline()
+        total = meta.get("total_duration_ms")
+        self.assertIsNotNone(total)
+        self.assertIsInstance(total, float)
+        self.assertGreaterEqual(total, 0)
+
+    def test_each_step_has_duration_ms(self) -> None:
+        _, meta = self._run_pipeline()
+        trace = meta.get("workflow_trace", [])
+        # incident step has no duration (it's a marker, not timed work)
+        timed_steps = [e for e in trace if e["step"] != "incident"]
+        self.assertGreaterEqual(len(timed_steps), 3)
+        for entry in timed_steps:
+            self.assertIn(
+                "duration_ms",
+                entry,
+                f"step '{entry['step']}' missing duration_ms",
+            )
+            self.assertIsInstance(entry["duration_ms"], float)
+            self.assertGreaterEqual(entry["duration_ms"], 0)
+
+    def test_step_durations_sum_leq_total(self) -> None:
+        _, meta = self._run_pipeline()
+        total = meta["total_duration_ms"]
+        trace = meta.get("workflow_trace", [])
+        step_sum = sum(e.get("duration_ms", 0) for e in trace if e["step"] != "incident")
+        # step sum should be <= total (total includes overhead)
+        self.assertLessEqual(step_sum, total + 1.0)  # 1ms tolerance for rounding
+
+    def test_degraded_run_still_has_observability_fields(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            ExplodingGenerator(),
+        )
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+
+        self.assertIn("request_id", meta)
+        self.assertIn("total_duration_ms", meta)
+        trace = meta.get("workflow_trace", [])
+        timed_steps = [e for e in trace if e["step"] != "incident"]
+        for entry in timed_steps:
+            self.assertIn("duration_ms", entry)
+
+
 if __name__ == "__main__":
     unittest.main()

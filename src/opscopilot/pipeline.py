@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+import uuid
 from typing import Any
 
 from .interfaces import AnalysisGenerator, KnowledgeRetriever
@@ -42,6 +44,9 @@ class IncidentAnalysisPipeline:
         self.last_run_metadata: dict[str, Any] = {}
 
     def run(self, event: IncidentEvent) -> AnalysisResult:
+        request_id = uuid.uuid4().hex[:16]
+        t0 = time.monotonic()
+
         workflow_state = self.workflow.run(event)
         result = workflow_state.final_result
         if result is None:
@@ -88,8 +93,12 @@ class IncidentAnalysisPipeline:
         workflow_meta = workflow_state.metadata.get("workflow", {})
         workflow_overview = workflow_meta.get("overview", {}) if isinstance(workflow_meta, dict) else {}
 
+        total_duration_ms = round((time.monotonic() - t0) * 1000, 2)
+
         self.last_run_metadata = {
+            "request_id": request_id,
             "event_type": event.event_type,
+            "total_duration_ms": total_duration_ms,
             "run_status": run_status,
             "had_fallback": had_fallback,
             "fallback_count": fallback_count,
