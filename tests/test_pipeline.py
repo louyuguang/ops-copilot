@@ -32,6 +32,29 @@ class FakeClient:
         }
 
 
+class FakeClientWithUsage:
+    def __init__(self) -> None:
+        self.last_response_metadata = {
+            "provider": "openai_compatible",
+            "model": "gpt-5.4",
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "total_tokens": 150,
+            },
+        }
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        _ = (system_prompt, user_prompt)
+        return {
+            "summary": "LLM summary with usage",
+            "possible_causes": ["A"],
+            "suggested_checks": ["C"],
+            "recommended_refs": ["docs/cards/custom.md"],
+            "confidence": "high",
+        }
+
+
 class FailingClient:
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
         _ = (system_prompt, user_prompt)
@@ -684,7 +707,7 @@ class CompareScriptTest(unittest.TestCase):
 
 
 class ObservabilityFieldsTest(unittest.TestCase):
-    """Week 7 Day 2: request_id, total_duration_ms, per-step duration_ms."""
+    """Week 7 Day 2/3: request_id, latency, token usage, cost estimate."""
 
     def _run_pipeline(self) -> tuple:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
@@ -752,6 +775,59 @@ class ObservabilityFieldsTest(unittest.TestCase):
         timed_steps = [e for e in trace if e["step"] != "incident"]
         for entry in timed_steps:
             self.assertIn("duration_ms", entry)
+
+    def test_token_usage_and_cost_estimate_present_when_provider_usage_available(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            LLMAnalyzer(client=FakeClientWithUsage()),
+        )
+
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+
+        self.assertTrue(meta.get("token_usage_available"))
+        self.assertEqual(120, meta.get("token_usage", {}).get("prompt_tokens"))
+        self.assertEqual(30, meta.get("token_usage", {}).get("completion_tokens"))
+        self.assertEqual(150, meta.get("token_usage", {}).get("total_tokens"))
+
+        cost = meta.get("cost_estimate", {})
+        self.assertTrue(cost.get("available"))
+        self.assertIn("input_cost", cost)
+        self.assertIn("output_cost", cost)
+        self.assertIn("total_cost", cost)
+
+    def test_token_usage_explicit_unavailable_when_provider_usage_missing(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            LLMAnalyzer(client=FakeClient()),
+        )
+
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+
+        self.assertFalse(meta.get("token_usage_available"))
+        self.assertEqual("provider_usage_missing", meta.get("token_usage", {}).get("reason"))
+        self.assertFalse(meta.get("cost_estimate", {}).get("available"))
+
+    def test_rule_fallback_run_has_explainable_token_and_cost_metadata(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            LLMAnalyzer(client=None),
+        )
+
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+
+        self.assertEqual("degraded_success", meta.get("run_status"))
+        self.assertFalse(meta.get("token_usage_available"))
+        self.assertEqual("llm_not_called", meta.get("token_usage", {}).get("reason"))
+        self.assertEqual(
+            "unavailable:llm_not_called",
+            meta.get("cost_estimate", {}).get("estimate_basis"),
+        )
 
 
 if __name__ == "__main__":

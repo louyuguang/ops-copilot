@@ -9,6 +9,13 @@ from .models import AnalysisResult, IncidentEvent
 from .workflow import IncidentWorkflowRunner
 
 
+_MODEL_COST_PER_1K_TOKENS: dict[str, dict[str, float]] = {
+    # Week 7 Day 3 MVP: lightweight, configurable later.
+    # Unknown models will gracefully fallback to zero-cost estimate with explicit basis.
+    "gpt-5.4": {"input": 0.0, "output": 0.0},
+}
+
+
 def _extract_decision(meta: dict[str, Any]) -> dict[str, Any]:
     decision = meta.get("path_decision")
     if isinstance(decision, dict):
@@ -32,6 +39,118 @@ def _effective_mode(meta: dict[str, Any], decision: dict[str, Any]) -> str:
     if decision.get("action") == "fallback" and decision.get("to"):
         return str(decision["to"])
     return str(meta.get("mode") or "unknown")
+
+
+def _to_int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_token_usage(generator_meta: dict[str, Any]) -> dict[str, Any]:
+    usage = generator_meta.get("usage")
+    if not isinstance(usage, dict):
+        if generator_meta.get("llm_called"):
+            return {
+                "available": False,
+                "reason": "provider_usage_missing",
+                "source": "llm_provider",
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+            }
+        if generator_meta.get("mode") == "llm":
+            return {
+                "available": False,
+                "reason": "llm_not_called",
+                "source": "llm_provider",
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+            }
+        return {
+            "available": False,
+            "reason": "llm_not_used",
+            "source": "not_applicable",
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+        }
+
+    prompt_tokens = _to_int_or_none(usage.get("prompt_tokens"))
+    if prompt_tokens is None:
+        prompt_tokens = _to_int_or_none(usage.get("input_tokens"))
+
+    completion_tokens = _to_int_or_none(usage.get("completion_tokens"))
+    if completion_tokens is None:
+        completion_tokens = _to_int_or_none(usage.get("output_tokens"))
+
+    total_tokens = _to_int_or_none(usage.get("total_tokens"))
+    if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+        total_tokens = prompt_tokens + completion_tokens
+
+    if prompt_tokens is None and completion_tokens is None and total_tokens is None:
+        return {
+            "available": False,
+            "reason": "provider_usage_unparseable",
+            "source": "llm_provider",
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+        }
+
+    return {
+        "available": True,
+        "reason": None,
+        "source": "llm_provider",
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _estimate_cost(generator_meta: dict[str, Any], token_usage: dict[str, Any]) -> dict[str, Any]:
+    model = str(generator_meta.get("model") or "unknown")
+    if not token_usage.get("available"):
+        return {
+            "available": False,
+            "currency": "USD",
+            "input_cost": None,
+            "output_cost": None,
+            "total_cost": None,
+            "estimate_basis": f"unavailable:{token_usage.get('reason')}",
+            "model": model,
+        }
+
+    pricing = _MODEL_COST_PER_1K_TOKENS.get(model)
+    prompt_tokens = int(token_usage.get("prompt_tokens") or 0)
+    completion_tokens = int(token_usage.get("completion_tokens") or 0)
+
+    if pricing is None:
+        return {
+            "available": True,
+            "currency": "USD",
+            "input_cost": 0.0,
+            "output_cost": 0.0,
+            "total_cost": 0.0,
+            "estimate_basis": "usage_available_but_model_pricing_unknown_zero_fallback",
+            "model": model,
+        }
+
+    input_cost = round(prompt_tokens / 1000 * pricing["input"], 6)
+    output_cost = round(completion_tokens / 1000 * pricing["output"], 6)
+    return {
+        "available": True,
+        "currency": "USD",
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "total_cost": round(input_cost + output_cost, 6),
+        "estimate_basis": "model_pricing_table_per_1k_tokens",
+        "model": model,
+    }
 
 
 class IncidentAnalysisPipeline:
@@ -94,11 +213,16 @@ class IncidentAnalysisPipeline:
         workflow_overview = workflow_meta.get("overview", {}) if isinstance(workflow_meta, dict) else {}
 
         total_duration_ms = round((time.monotonic() - t0) * 1000, 2)
+        token_usage = _extract_token_usage(generator_meta)
+        cost_estimate = _estimate_cost(generator_meta, token_usage)
 
         self.last_run_metadata = {
             "request_id": request_id,
             "event_type": event.event_type,
             "total_duration_ms": total_duration_ms,
+            "token_usage_available": bool(token_usage.get("available")),
+            "token_usage": token_usage,
+            "cost_estimate": cost_estimate,
             "run_status": run_status,
             "had_fallback": had_fallback,
             "fallback_count": fallback_count,

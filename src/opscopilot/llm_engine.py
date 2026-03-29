@@ -76,6 +76,7 @@ class OpenAIChatClient:
 
     def __init__(self, settings: OpenAISettings) -> None:
         self.settings = settings
+        self.last_response_metadata: dict[str, Any] = {}
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         payload = {
@@ -104,6 +105,12 @@ class OpenAIChatClient:
                 raw = json.loads(resp.read().decode("utf-8"))
         except error.URLError as exc:
             raise LLMCallError(f"LLM request failed: {exc}") from exc
+
+        self.last_response_metadata = {
+            "provider": "openai_compatible",
+            "model": raw.get("model") or self.settings.model,
+            "usage": raw.get("usage"),
+        }
 
         content = raw.get("choices", [{}])[0].get("message", {}).get("content", "{}")
         try:
@@ -158,6 +165,7 @@ class LLMAnalyzer:
 
         metadata: dict[str, Any] = {
             "mode": "llm",
+            "model": getattr(getattr(self.client, "settings", None), "model", None) if self.client else None,
             "llm_configured": self.client is not None,
             "llm_called": False,
             "llm_used": False,
@@ -214,6 +222,9 @@ class LLMAnalyzer:
             try:
                 metadata["llm_called"] = True
                 llm_data = self.client.complete_json(system_prompt, user_prompt)
+                provider_meta = self._extract_provider_metadata()
+                if provider_meta:
+                    metadata.update(provider_meta)
                 result = self._merge_with_fallback(llm_data, rule_result)
                 metadata["llm_used"] = True
                 metadata["path_decision"] = {
@@ -285,6 +296,21 @@ class LLMAnalyzer:
                 self.last_metadata = metadata
                 logger.warning("LLM analyze failed, using fallback: %s", metadata)
                 return rule_result
+
+    def _extract_provider_metadata(self) -> dict[str, Any]:
+        if self.client is None:
+            return {}
+        raw = getattr(self.client, "last_response_metadata", None)
+        if not isinstance(raw, dict):
+            return {}
+        usage = raw.get("usage")
+        model = raw.get("model") or getattr(getattr(self.client, "settings", None), "model", None)
+        provider = raw.get("provider") or "openai_compatible"
+        return {
+            "provider": provider,
+            "model": model,
+            "usage": usage,
+        }
 
     def _should_retry_llm_error(self, exc: LLMCallError, current_retry_count: int) -> bool:
         if current_retry_count >= self.max_retries:
