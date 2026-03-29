@@ -245,6 +245,11 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual("degraded_success", pipeline.last_run_metadata.get("run_status"))
         self.assertTrue(pipeline.last_run_metadata.get("had_fallback"))
         self.assertEqual(1, pipeline.last_run_metadata.get("fallback_count"))
+        self.assertEqual("fallback", pipeline.last_run_metadata.get("final_analysis", {}).get("path"))
+        self.assertEqual(
+            "fallback",
+            pipeline.last_run_metadata.get("decisions", {}).get("generator", {}).get("action"),
+        )
 
     def test_llm_missing_key_fallback_semantics(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
@@ -414,6 +419,26 @@ class PipelineTest(unittest.TestCase):
             workflow_meta.get("steps"),
         )
         self.assertEqual(4, len(workflow_trace))
+        for entry in workflow_trace:
+            self.assertIn("step", entry)
+            self.assertIn("status", entry)
+            self.assertIn("path_decision", entry)
+            self.assertIn("degraded", entry)
+            self.assertIn("details", entry)
+            self.assertTrue(
+                {"action", "from", "to", "reason", "after_retry"}.issubset(
+                    set(entry.get("path_decision", {}).keys())
+                )
+            )
+
+        overview = run_meta.get("workflow_overview", {})
+        self.assertEqual(4, overview.get("total_steps"))
+        self.assertEqual(0, overview.get("degraded_step_count"))
+        self.assertEqual(0, overview.get("fallback_step_count"))
+        self.assertEqual(0, overview.get("continue_step_count"))
+        self.assertEqual("primary", overview.get("final_path"))
+        self.assertFalse(overview.get("degraded"))
+
         self.assertEqual(5, run_meta.get("structured_checks", {}).get("count"))
         self.assertEqual("structured_mixed", run_meta.get("structured_checks", {}).get("source"))
         self.assertEqual(4, run_meta.get("structured_checks", {}).get("source_counts", {}).get("rule"))
@@ -503,6 +528,9 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(1, run_meta.get("structured_checks", {}).get("source_counts", {}).get("fallback"))
         self.assertEqual("degraded", run_meta.get("workflow_trace", [])[1].get("status"))
         self.assertEqual("degraded", run_meta.get("workflow_trace", [])[2].get("status"))
+        self.assertEqual("continue", run_meta.get("decisions", {}).get("retriever", {}).get("action"))
+        self.assertEqual("fallback", run_meta.get("decisions", {}).get("checks", {}).get("action"))
+        self.assertGreaterEqual(run_meta.get("workflow_overview", {}).get("degraded_step_count", 0), 2)
 
     def test_local_retriever_metadata_contains_required_fields(self) -> None:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_memory.json")

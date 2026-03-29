@@ -85,6 +85,9 @@ class IncidentAnalysisPipeline:
         checks_meta = workflow_state.metadata.get("checks", {})
         final_meta = workflow_state.metadata.get("final_analysis", {})
 
+        workflow_meta = workflow_state.metadata.get("workflow", {})
+        workflow_overview = workflow_meta.get("overview", {}) if isinstance(workflow_meta, dict) else {}
+
         self.last_run_metadata = {
             "event_type": event.event_type,
             "run_status": run_status,
@@ -96,7 +99,8 @@ class IncidentAnalysisPipeline:
             "effective_path": effective_path,
             "retriever": retriever_meta,
             "generator": generator_meta,
-            "workflow": workflow_state.metadata.get("workflow", {}),
+            "workflow": workflow_meta,
+            "workflow_overview": workflow_overview,
             "workflow_trace": workflow_state.step_trace,
             "retrieve": {
                 "source": retrieve_meta.get("source", retriever_meta.get("mode", "unknown")),
@@ -129,6 +133,13 @@ class IncidentAnalysisPipeline:
             },
             "decisions": {
                 "retriever": retriever_decision,
+                "checks": {
+                    "action": checks_meta.get("path", "primary"),
+                    "from": checks_meta.get("source", "structured_mixed"),
+                    "to": checks_meta.get("source", "structured_mixed"),
+                    "reason": checks_meta.get("error_type"),
+                    "after_retry": False,
+                },
                 "generator": generator_decision,
             },
         }

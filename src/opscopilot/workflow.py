@@ -7,14 +7,46 @@ from .models import IncidentEvent, WorkflowState
 from .rule_engine import RuleBasedAnalyzer
 
 
-def _append_trace(state: WorkflowState, *, step: str, status: str = "ok", details: dict[str, Any] | None = None) -> None:
-    state.step_trace.append(
-        {
-            "step": step,
-            "status": status,
-            "details": details or {},
-        }
-    )
+def _normalize_path_decision(
+    *,
+    action: str = "primary",
+    from_mode: str | None = None,
+    to_mode: str | None = None,
+    reason: str | None = None,
+    after_retry: bool = False,
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "from": from_mode,
+        "to": to_mode,
+        "reason": reason,
+        "after_retry": bool(after_retry),
+    }
+
+
+def _append_trace(
+    state: WorkflowState,
+    *,
+    step: str,
+    status: str = "ok",
+    path_decision: dict[str, Any] | None = None,
+    details: dict[str, Any] | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    normalized_decision = path_decision or _normalize_path_decision()
+    trace_entry = {
+        "step": step,
+        "status": status,
+        "path_decision": normalized_decision,
+        "degraded": status != "ok" or normalized_decision.get("action") == "fallback",
+        "details": details or {},
+    }
+    if error_type:
+        trace_entry["error_type"] = error_type
+    if error_message:
+        trace_entry["error_message"] = error_message
+    state.step_trace.append(trace_entry)
 
 
 class RetrieveKnowledgeCardsStep:
@@ -77,7 +109,23 @@ class RetrieveKnowledgeCardsStep:
         if step_error:
             details["error"] = step_error
 
-        _append_trace(state, step=self.name, status=status, details=details)
+        decision = retriever_meta.get("path_decision")
+        if not isinstance(decision, dict):
+            decision = _normalize_path_decision(
+                action=retrieve_summary["path"],
+                from_mode=retrieve_summary["source"],
+                to_mode=retrieve_summary["source"],
+            )
+
+        _append_trace(
+            state,
+            step=self.name,
+            status=status,
+            path_decision=decision,
+            details=details,
+            error_type=retriever_meta.get("error_type"),
+            error_message=step_error,
+        )
         return state
 
 
@@ -131,7 +179,9 @@ class ExtractStructuredChecksStep:
             ]
 
         state.structured_check_items = structured_items
-        state.structured_checks = [str(item.get("title", "")).strip() for item in structured_items if str(item.get("title", "")).strip()]
+        state.structured_checks = [
+            str(item.get("title", "")).strip() for item in structured_items if str(item.get("title", "")).strip()
+        ]
 
         source_counts: dict[str, int] = {}
         for item in structured_items:
@@ -159,7 +209,23 @@ class ExtractStructuredChecksStep:
         if step_error:
             details["error"] = step_error
 
-        _append_trace(state, step=self.name, status=status, details=details)
+        decision = _normalize_path_decision(
+            action=checks_meta["path"],
+            from_mode="structured_mixed",
+            to_mode="structured_mixed",
+            reason=checks_meta.get("error_type"),
+            after_retry=False,
+        )
+
+        _append_trace(
+            state,
+            step=self.name,
+            status=status,
+            path_decision=decision,
+            details=details,
+            error_type=checks_meta.get("error_type"),
+            error_message=step_error,
+        )
         return state
 
 
@@ -246,6 +312,20 @@ class BuildFinalAnalysisStep:
                 },
             }
 
+        decision = generator_meta.get("path_decision")
+        if not isinstance(decision, dict):
+            decision = _normalize_path_decision(
+                action="fallback" if generator_meta.get("fallback") else "primary",
+                from_mode=generator_meta.get("mode"),
+                to_mode=generator_meta.get("fallback_to") or generator_meta.get("mode"),
+                reason=generator_meta.get("fallback_reason"),
+                after_retry=bool(generator_meta.get("fallback_after_retry", False)),
+            )
+
+        if status == "ok" and decision.get("action") == "fallback":
+            status = "degraded"
+        final_path = str(decision.get("action") or final_path)
+
         state.final_result = result
         state.metadata["generator"] = generator_meta
 
@@ -279,7 +359,15 @@ class BuildFinalAnalysisStep:
         if final_error:
             trace_details["error"] = final_error
 
-        _append_trace(state, step=self.name, status=status, details=trace_details)
+        _append_trace(
+            state,
+            step=self.name,
+            status=status,
+            path_decision=decision,
+            details=trace_details,
+            error_type=final_meta.get("error_type"),
+            error_message=final_error,
+        )
         return state
 
 
@@ -295,13 +383,47 @@ class IncidentWorkflowRunner:
 
     def run(self, event: IncidentEvent) -> WorkflowState:
         state = WorkflowState(event=event)
-        _append_trace(state, step="incident", details={"event_type": event.event_type})
+        _append_trace(
+            state,
+            step="incident",
+            path_decision=_normalize_path_decision(action="primary", from_mode="incident", to_mode="incident"),
+            details={"event_type": event.event_type},
+        )
 
         for step in self.steps:
             state = step.execute(state)
 
+        steps = [trace["step"] for trace in state.step_trace]
+        degraded_steps = [trace["step"] for trace in state.step_trace if trace.get("status") != "ok"]
+        fallback_steps = [
+            trace["step"]
+            for trace in state.step_trace
+            if trace.get("path_decision", {}).get("action") == "fallback"
+        ]
+        continue_steps = [
+            trace["step"]
+            for trace in state.step_trace
+            if trace.get("path_decision", {}).get("action") == "continue"
+        ]
+        final_path = str(state.step_trace[-1].get("path_decision", {}).get("action", "unknown"))
+        step_status_map = {trace["step"]: trace.get("status", "unknown") for trace in state.step_trace}
+        step_decision_map = {
+            trace["step"]: trace.get("path_decision", {}).get("action", "primary")
+            for trace in state.step_trace
+        }
+
         state.metadata["workflow"] = {
             "step_path": "incident -> retrieve -> checks -> final_analysis",
-            "steps": [trace["step"] for trace in state.step_trace],
+            "steps": steps,
+            "overview": {
+                "total_steps": len(state.step_trace),
+                "degraded_step_count": len(degraded_steps),
+                "fallback_step_count": len(fallback_steps),
+                "continue_step_count": len(continue_steps),
+                "final_path": final_path,
+                "degraded": bool(degraded_steps),
+                "step_status": step_status_map,
+                "step_path_decisions": step_decision_map,
+            },
         }
         return state
