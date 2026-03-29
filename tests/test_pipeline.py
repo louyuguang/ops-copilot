@@ -707,7 +707,7 @@ class CompareScriptTest(unittest.TestCase):
 
 
 class ObservabilityFieldsTest(unittest.TestCase):
-    """Week 7 Day 2/3: request_id, latency, token usage, cost estimate."""
+    """Week 7 Day 2/4: request_id, latency, token usage/cost, error/degraded summary."""
 
     def _run_pipeline(self) -> tuple:
         event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
@@ -828,6 +828,68 @@ class ObservabilityFieldsTest(unittest.TestCase):
             "unavailable:llm_not_called",
             meta.get("cost_estimate", {}).get("estimate_basis"),
         )
+
+    def test_error_summary_and_degraded_reason_for_clean_run(self) -> None:
+        _, meta = self._run_pipeline()
+
+        error_summary = meta.get("error_summary", {})
+        self.assertFalse(error_summary.get("had_error"))
+        self.assertEqual(0, error_summary.get("error_count"))
+        self.assertIsNone(error_summary.get("primary_error_type"))
+        self.assertIsNone(error_summary.get("primary_error_step"))
+
+        degraded_reason = meta.get("degraded_reason", {})
+        self.assertFalse(degraded_reason.get("degraded"))
+        self.assertEqual("clean_run", degraded_reason.get("type"))
+        self.assertIsNone(degraded_reason.get("step"))
+        self.assertIsNone(degraded_reason.get("reason"))
+
+    def test_error_summary_and_degraded_reason_for_fallback_run(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            LLMAnalyzer(client=ParseFailingClient(), max_retries=1),
+        )
+
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+
+        self.assertEqual("degraded_success", meta.get("run_status"))
+
+        error_summary = meta.get("error_summary", {})
+        self.assertTrue(error_summary.get("had_error"))
+        self.assertEqual("output_parse_failed", error_summary.get("primary_error_type"))
+        self.assertEqual("final_analysis", error_summary.get("primary_error_step"))
+
+        degraded_reason = meta.get("degraded_reason", {})
+        self.assertTrue(degraded_reason.get("degraded"))
+        self.assertEqual("fallback", degraded_reason.get("type"))
+        self.assertEqual("final_analysis", degraded_reason.get("step"))
+        self.assertEqual("llm_output_parse_failed", degraded_reason.get("reason"))
+
+    def test_degraded_reason_for_continue_path_aligns_with_run_status(self) -> None:
+        event = load_event(BASE_DIR / "samples" / "incidents" / "high_cpu.json")
+        event.raw["event_type"] = "disk_io_saturation"
+        event = IncidentEvent.from_dict(event.raw)
+
+        pipeline = IncidentAnalysisPipeline(
+            LocalCardRetriever(BASE_DIR / "docs" / "cards"),
+            RuleBasedAnalyzer(),
+        )
+
+        _ = pipeline.run(event)
+        meta = pipeline.last_run_metadata
+
+        self.assertEqual("empty_retrieval_continue", meta.get("run_status"))
+
+        error_summary = meta.get("error_summary", {})
+        self.assertFalse(error_summary.get("had_error"))
+
+        degraded_reason = meta.get("degraded_reason", {})
+        self.assertTrue(degraded_reason.get("degraded"))
+        self.assertEqual("continue", degraded_reason.get("type"))
+        self.assertEqual("retrieve", degraded_reason.get("step"))
+        self.assertEqual("retrieval_empty", degraded_reason.get("reason"))
 
 
 if __name__ == "__main__":

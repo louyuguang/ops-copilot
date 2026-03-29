@@ -153,6 +153,102 @@ def _estimate_cost(generator_meta: dict[str, Any], token_usage: dict[str, Any]) 
     }
 
 
+def _build_error_summary(
+    workflow_trace: list[dict[str, Any]],
+    retriever_meta: dict[str, Any],
+    checks_meta: dict[str, Any],
+    generator_meta: dict[str, Any],
+    final_meta: dict[str, Any],
+) -> dict[str, Any]:
+    non_error_types = {"retrieval_empty"}
+
+    error_entries: list[tuple[str | None, str]] = []
+    for entry in workflow_trace:
+        error_type = entry.get("error_type")
+        if isinstance(error_type, str) and error_type and error_type not in non_error_types:
+            error_entries.append((entry.get("step"), error_type))
+
+    fallback_candidates = [
+        ("retrieve", retriever_meta.get("error_type")),
+        ("checks", checks_meta.get("error_type")),
+        ("final_analysis", final_meta.get("error_type")),
+        ("final_analysis", generator_meta.get("error_type")),
+    ]
+    for step, error_type in fallback_candidates:
+        if isinstance(error_type, str) and error_type and error_type not in non_error_types:
+            if (step, error_type) not in error_entries:
+                error_entries.append((step, error_type))
+
+    if not error_entries:
+        return {
+            "had_error": False,
+            "error_count": 0,
+            "primary_error_type": None,
+            "primary_error_step": None,
+        }
+
+    primary_step, primary_type = error_entries[0]
+    return {
+        "had_error": True,
+        "error_count": len(error_entries),
+        "primary_error_type": primary_type,
+        "primary_error_step": primary_step,
+    }
+
+
+def _build_degraded_reason(run_status: str, workflow_trace: list[dict[str, Any]]) -> dict[str, Any]:
+    if run_status == "success":
+        return {
+            "degraded": False,
+            "type": "clean_run",
+            "step": None,
+            "reason": None,
+        }
+
+    preferred_actions = ["fallback", "continue"]
+    selected_entry: dict[str, Any] | None = None
+    selected_action: str | None = None
+
+    for action in preferred_actions:
+        for entry in workflow_trace:
+            path_decision = entry.get("path_decision")
+            if isinstance(path_decision, dict) and path_decision.get("action") == action:
+                selected_entry = entry
+                selected_action = action
+                break
+        if selected_entry is not None:
+            break
+
+    if selected_entry is None:
+        for entry in workflow_trace:
+            if entry.get("status") != "ok":
+                selected_entry = entry
+                selected_action = "degraded"
+                break
+
+    if selected_entry is None:
+        return {
+            "degraded": True,
+            "type": "unknown",
+            "step": None,
+            "reason": run_status,
+        }
+
+    decision = selected_entry.get("path_decision", {}) if isinstance(selected_entry, dict) else {}
+    reason = None
+    if isinstance(decision, dict):
+        reason = decision.get("reason")
+    if not reason:
+        reason = selected_entry.get("error_type")
+
+    return {
+        "degraded": True,
+        "type": selected_action,
+        "step": selected_entry.get("step"),
+        "reason": reason,
+    }
+
+
 class IncidentAnalysisPipeline:
     """Composable pipeline with clear hooks for future RAG + LLM integration."""
 
@@ -215,6 +311,14 @@ class IncidentAnalysisPipeline:
         total_duration_ms = round((time.monotonic() - t0) * 1000, 2)
         token_usage = _extract_token_usage(generator_meta)
         cost_estimate = _estimate_cost(generator_meta, token_usage)
+        error_summary = _build_error_summary(
+            workflow_state.step_trace,
+            retriever_meta,
+            checks_meta,
+            generator_meta,
+            final_meta,
+        )
+        degraded_reason = _build_degraded_reason(run_status, workflow_state.step_trace)
 
         self.last_run_metadata = {
             "request_id": request_id,
@@ -224,6 +328,8 @@ class IncidentAnalysisPipeline:
             "token_usage": token_usage,
             "cost_estimate": cost_estimate,
             "run_status": run_status,
+            "error_summary": error_summary,
+            "degraded_reason": degraded_reason,
             "had_fallback": had_fallback,
             "fallback_count": fallback_count,
             "had_retry": had_retry,
